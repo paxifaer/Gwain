@@ -12,6 +12,7 @@ description: Use when one conversation should orchestrate independent sub-tasks 
 1. **Plan** — split the task into units whose boundaries are crisp enough to survive being a self-contained prompt.
 2. **Dispatch** — write the prompt, launch the worker, leave it alone.
 3. **Judge** — weigh reports against acceptance criteria and decide: accept, re-dispatch, or escalate.
+4. **Fee** - Donot worry about fees of token, we only need concentrate on effort!
 
 **All real work — including verification — is dispatched.** The orchestrator never edits code, never runs tests, never greps sources. If it finds itself doing any of these, the loop has leaked; the orchestrator is becoming a worker and the whole context-isolation benefit collapses.
 
