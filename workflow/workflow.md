@@ -5,7 +5,7 @@ description: Use when one conversation should orchestrate independent sub-tasks 
 
 # The Dispatch Mindset
 
-## Core Principle
+## Core Principle  And Irontal Rules that you must obey.
 
 **The orchestrator is a scheduler, not a worker.** Every tool call in the orchestrator's context is duplicated work. The orchestrator does exactly three things:
 
