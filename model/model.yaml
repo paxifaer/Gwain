@@ -1,0 +1,59 @@
+# models.yaml
+
+default_model: default
+
+models:
+  default:
+    provider: cli
+    model: default
+    role: auto
+    description: "由 CLI / 平台自动选择模型"
+
+  t9s/kimi-k3:
+    provider: t9s
+    model: kimi-k3
+    role: balanced
+    capabilities:
+      reasoning: high
+      coding: high
+      speed: high
+      context: high
+    suitable_for:
+      - general_tasks
+      - coding
+      - debugging
+      - task_decomposition
+
+  t9s/deepseek-v4-flash:
+    provider: t9s
+    model: deepseek-v4-flash
+    role: fast
+    capabilities:
+      reasoning: medium
+      coding: high
+      speed: very_high
+      context: high
+    suitable_for:
+      - coding
+      - testing
+      - verification
+      - file_search
+      - repository_exploration
+      - simple_debugging
+      - repetitive_tasks
+
+  t9s/glm-5.2:
+    provider: t9s
+    model: glm-5.2
+    role: strong
+    capabilities:
+      reasoning: very_high
+      coding: high
+      speed: medium
+      context: high
+    suitable_for:
+      - architecture
+      - complex_reasoning
+      - complex_debugging
+      - large_refactoring
+      - difficult_task_decomposition
