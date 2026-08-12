@@ -94,3 +94,32 @@ The verifier returns per-claim verdicts with evidence (actual grep output, actua
 | Micromanaging a live worker | prompt was wrong — kill it, improve prompt, relaunch |
 | One mega-worker does everything | that's just a bigger conversation, context problem intact |
 | Sharing context by name | workers can't see your session — files with contents, not "as discussed" |
+
+
+## Model Selection
+
+Before starting a task, inspect `models.yaml` and select the appropriate model.
+
+### Rules
+
+1. Never assume a model is available unless it is defined in `model.yaml`.(file where it is at ../model/model.yaml this repo)
+2. Classify the task by complexity and execution type before selecting a model.
+3. Prefer:
+   - `t9s/deepseek-v4-flash`: fast coding, search, inspection, testing, verification, repetitive tasks.
+   - `t9s/kimi-k3`: general development, debugging, task decomposition.
+   - `t9s/glm-5.2`: architecture, complex reasoning, difficult debugging, large refactoring.
+   - `default`: when explicit model selection is unnecessary.
+4. Do not ask the user for model selection by default.
+5. Ask only when model choice has a meaningful impact on quality, speed, cost, or task success.
+6. Respect an explicit user model preference and do not ask again.
+7. Model selection may change during execution. Escalate to a stronger model when the task becomes more complex; use a fast model for routine execution and verification.
+
+### Selection Record
+
+Before execution, record the selected model and selection mode:
+
+```yaml
+model_selection:
+  model: t9s/deepseek-v4-flash
+  mode: automatic
+  reason: coding_and_testing
