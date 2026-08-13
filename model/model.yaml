@@ -13,16 +13,23 @@ models:
     provider: t9s
     model: kimi-k3
     role: balanced
+
     capabilities:
       reasoning: high
       coding: high
       speed: high
       context: high
+      multimodal: high
+
     suitable_for:
       - general_tasks
       - coding
       - debugging
       - task_decomposition
+      - visual_debugging
+      - deployment_debugging
+      - ui_testing
+      - screenshot_analysis
 
   t9s/deepseek-v4-flash:
     provider: t9s
