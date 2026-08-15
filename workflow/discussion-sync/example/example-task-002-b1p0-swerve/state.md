@@ -15,7 +15,7 @@ in_progress
 <!-- Derived projection. Written ONLY by the orchestrator (mechanical rewrite after each ingest / invalidation run). Read-only for workers. Frontier-only: list only leaf derivations (those with no valid dependents); interior nodes lazy-load from decisions.md. Whole file must stay ≤ 60 lines. -->
 - Goal: see task.md
 - Valid Assumptions:
-  - A-001 — N=3 modules, positions (r_x,i, r_y,i) fixed by chassis geometry — spec
+  - A-001 — N=4 modules, positions (r_x,i, r_y,i) fixed by chassis geometry — spec
   - A-002 — steering Profile-Position, drive Velocity, 20 Hz policy / 120 Hz control — spec
   - A-003 — δ = −p_enc / k_shaft, k_shaft = 1.0, no [-π,π] hard limit — spec
   - A-004 — λ is a fixed tunable per-build constant — spec

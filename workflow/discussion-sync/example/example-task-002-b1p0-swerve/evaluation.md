@@ -16,8 +16,8 @@ Implementation Map is develop-worker-written. See templates/evaluation.md.
 
 <!-- Written ONLY by verifier sessions; one target per verdict. -->
 
-- V-001 — target: DER-001 — method: fixture — expected: v=(1,0,0) ⇒ all u_x,i=1 and all u_y,i=0 — actual: 6 wheels × (1,0) matched to 1e-12 tolerance — verdict: PASS — evidence: rb_drivers/fixtures/der001_pure_translation.json (example path) — author: example-verifier-session
-- V-002 — target: DER-002 — method: fixture — expected: δ=0 and v=(1,0,0) ⇒ a_iᵀv = 0 for every wheel — actual: max |a_iᵀv| = 0.0 across all 6 wheels — verdict: PASS — evidence: rb_drivers/fixtures/der002_zero_sideslip_forward.json (example path) — author: example-verifier-session
+- V-001 — target: DER-001 — method: fixture — expected: v=(1,0,0) ⇒ all u_x,i=1 and all u_y,i=0 — actual: 4 wheels × (1,0) matched to 1e-12 tolerance — verdict: PASS — evidence: rb_drivers/fixtures/der001_pure_translation.json (example path) — author: example-verifier-session
+- V-002 — target: DER-002 — method: fixture — expected: δ=0 and v=(1,0,0) ⇒ a_iᵀv = 0 for every wheel — actual: max |a_iᵀv| = 0.0 across all 4 wheels — verdict: PASS — evidence: rb_drivers/fixtures/der002_zero_sideslip_forward.json (example path) — author: example-verifier-session
 - V-003 — target: DER-003 — method: numeric — expected: rank(A) = 3 for randomized δ ∈ (−π, π]^4 — actual: minimum singular value 0.37 across 128 seeds, never below 0.05 — verdict: PASS — evidence: logs/der003_rank_fixture.log (example path) — author: example-verifier-session
 - V-004 — target: DER-004 — method: numeric — expected: eigs(Q + λAᵀA) all > 0 across the same 128 δ fixtures — actual: min eigenvalue 1.0 (Q lower bound), max 14.6, zero failures — verdict: PASS — evidence: logs/der004_spd_eigs.log (example path) — author: example-verifier-session
 - V-005 — target: DER-005 — method: fixture — expected: p_enc = 5.5π ⇒ δ_cmd = −0.5π — actual: δ_cmd = −0.5π exactly — verdict: PASS — evidence: rb_drivers/fixtures/der005_unwrap_flip.json (example path) — author: example-verifier-session

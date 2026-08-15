@@ -7,6 +7,10 @@ Static-ish: ingest mutates ONLY by appending CONFIRMED `requirements` to the
 
 task_id: example-task-002-b1p0-swerve
 risk: high — triggers: H1, H2
+model_selection:
+  model: t9s/deepseek-v4-flash
+  mode: automatic
+  reason: coding_and_testing
 
 # B1P0 swerve slip-filter + closest-heading flip + heading-projection drive
 

@@ -29,7 +29,7 @@ Five sections per §9: Decisions / Constraints / Rejected / Assumptions / Deriva
 
 <!-- one-sentence premises; born valid because source: spec -->
 
-- A-001 — N swerve modules, currently N = 3, with module positions (r_x,i, r_y,i) fixed by chassis geometry — source: spec — status: valid
+- A-001 — N swerve modules, currently N = 4, with module positions (r_x,i, r_y,i) fixed by chassis geometry — source: spec — status: valid
 - A-002 — steering motors run Profile Position mode (slow) while drive motors run Velocity mode (fast), under a dual-rate 20 Hz policy / 120 Hz control architecture — source: spec — status: valid
 - A-003 — wheel angle δ = −p_enc / k_shaft with k_shaft = 1.0, and steering has no [-π, π] hard limit — source: spec — status: valid
 - A-004 — slip-penalty weight λ is a fixed tunable constant per build — source: spec — status: valid

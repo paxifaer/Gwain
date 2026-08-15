@@ -3,6 +3,8 @@ name: dispatching-multi-cli-workflows
 description: Use when one conversation should orchestrate independent sub-tasks across multiple background Claude sessions — triggers include task naturally decomposes, long verification loops would flood this session's context, workers need fresh isolated context, or parallel isolation.
 ---
 
+Entry point: fresh agents and post-compact recovery start at [`bootstrap.md`](bootstrap.md); the full rule index is [`rule-map.md`](rule-map.md). This file remains the normative methodology.
+
 # The Dispatch Mindset
 
 ## Core Principle  And Irontal Rules that you must obey.
@@ -35,7 +37,7 @@ Any ambiguity the prompt leaves open gets resolved by the model, not by you. Eve
 
 ## Dispatch Loop
 
-1. Write the spec as a file (single source of truth for all workers).
+1. Write the spec as a file (single source of truth for all workers): in the task directory when the task-state layout exists, otherwise in `handoffs/<task-name>/` of the working repo (one `SPEC-*.md` per task).
 2. Derive the worker prompt — self-contained, pinned session id, agreed output contract.
 3. Launch workers; one log file each.
 4. Poll sparingly — liveness and latest assistant text, never busy-loop.
@@ -61,7 +63,7 @@ Soft indicators — two or more make it high-risk:
 Rules:
 - Judge by task structure, never by "the agent feels the task is complex".
 - Default is the normal workflow. The user may force either direction.
-- Record the decision as one line in task.md, e.g. `risk: high — triggers: H1, S3`.
+- Record the decision as one line in task.md (or in the spec file for tasks without the task-state layout), e.g. `risk: high — triggers: H1, S3`.
 - High-risk tasks MUST use the task-state layout (task.md / state.md / decisions.md / evaluation.md / sync/) — for them it is mandatory, not opt-in — and follow the §9 reasoning protocol (ledger entries, verdicts, invalidation).
 - Workers of high-risk tasks receive a Reasoning State snapshot inside their prompt and MUST NOT modify symbols listed in state.md `## Blocked`; needing to touch one is an escalation trigger.
 
@@ -119,7 +121,7 @@ The verifier returns per-claim verdicts with evidence (actual grep output, actua
 
 ## Model Selection
 
-Before starting a task, inspect `models.yaml` and select the appropriate model.
+Before starting a task, inspect `model.yaml` and select the appropriate model.
 
 ### Rules
 

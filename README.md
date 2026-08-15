@@ -12,6 +12,7 @@ logs, and test runs inside their own sessions and return only summaries.
 
 ## Contents
 
+- [`workflow/bootstrap.md`](workflow/bootstrap.md) — entry point for any agent: what to load, when, and how to recover after compact.
 - [`workflow/workflow.md`](workflow/workflow.md) — the full methodology: prompt design,
   dispatch loop, output contracts, adversarial verification, escalation rules,
   failure modes and anti-patterns.
