@@ -18,6 +18,24 @@ description: Use when one conversation should orchestrate independent sub-tasks 
 
 Context is the resource being spent. A worker with a fresh session absorbs build logs and regressions *inside its own context* and returns only the summary. The orchestrator's context stays reserved for decisions, not logs.
 
+### Worker Delegation
+
+A Worker may delegate bounded supporting work to Subagents during task execution.
+
+```text
+Scheduler → Worker → Subagent(s)
+```
+
+* **Scheduler** assigns the primary task.
+* **Worker** owns the task and decides how to execute it.
+* **Subagent** handles bounded supporting work such as exploration, search, analysis, experiments, or other context-heavy operations.
+* The Worker remains responsible for evaluating Subagent results, integrating them, verifying the outcome, and reaching convergence.
+* Subagents inherit the Worker's relevant permissions and constraints and must not be used to bypass workflow governance.
+* Delegation is optional: use Subagents when they improve context isolation, efficiency, or reliability; do not delegate simple work unnecessarily.
+
+> **The Scheduler decides who owns the task; the Worker decides whether and how to delegate supporting work.**
+
+
 ## Prompt Design — The Worker Can't Ask Back
 
 A worker session reads the prompt once and runs to completion. It can't ask clarifying questions, share your conversation history, or see anything the prompt didn't say. The prompt must contain everything:
