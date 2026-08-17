@@ -38,7 +38,7 @@ Any ambiguity the prompt leaves open gets resolved by the model, not by you. Eve
 ## Dispatch Loop
 
 1. Write the spec as a file (single source of truth for all workers): in the task directory when the task-state layout exists, otherwise in `handoffs/<task-name>/` of the working repo (one `SPEC-*.md` per task).
-2. Derive the worker prompt — self-contained, pinned session id, agreed output contract.
+2. Derive the worker prompt — self-contained, pinned session id, agreed output contract; prepend the standard block from [`worker-preamble.md`](worker-preamble.md).
 3. Launch workers; one log file each.
 4. Poll sparingly — liveness and latest assistant text, never busy-loop.
 5. On completion, dispatch a **verifier worker** (see below).

@@ -50,3 +50,24 @@ No to all three → you are a plain worker; follow your prompt's output contract
    (e.g. "phase: verify worker W3; next: read its final message").
 5. Never infer which rules apply from conversational memory — infer from this
    file, [`rule-map.md`](rule-map.md), and the task's files.
+
+## Runtime Driver (SessionStart hook)
+
+A read-only SessionStart hook (`scripts/gawain-session-start.sh`) runs when a
+Claude Code session starts under this repo root. It scans
+`workflow/Gawain/workflow/handoffs/*/sync/*.yaml`, lists payloads whose
+`status:` is `pending`, and warns about `missing_sync` gaps in numeric IDs.
+Its output is injected into the agent's context at startup.
+
+It does NOT auto-ingest: pending payloads are still applied by explicitly
+running `prompts/PROMPT-orch-ingest.md` per the bootstrap chain. It does NOT
+modify any file, so task state is never mutated by the hook.
+
+Debug / disable: the hook is registered in
+`/home/abc/work/ai-stack/.claude/settings.json` under `hooks.SessionStart`.
+To disable, delete that block (or the whole `"hooks"` object). To run it
+manually: `scripts/gawain-session-start.sh --verbose`.
+
+Apply pending syncs by following
+[`discussion-sync/protocol.md`](discussion-sync/protocol.md) and ingesting via
+`discussion-sync/prompts/PROMPT-orch-ingest.md`.
