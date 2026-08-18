@@ -18,9 +18,7 @@ description: Use when one conversation should orchestrate independent sub-tasks 
 
 Context is the resource being spent. A worker with a fresh session absorbs build logs and regressions *inside its own context* and returns only the summary. The orchestrator's context stays reserved for decisions, not logs.
 
-### Worker Delegation
-
-A Worker may delegate bounded supporting work to Subagents during task execution.
+A worker with a fresh session may delegate bounded supporting work to Subagents during task execution.
 
 ```text
 Scheduler → Worker → Subagent(s)

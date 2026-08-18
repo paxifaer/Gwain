@@ -31,23 +31,6 @@ models:
       - ui_testing
       - screenshot_analysis
 
-  t9s/deepseek-v4-flash:
-    provider: t9s
-    model: deepseek-v4-flash
-    role: fast
-    capabilities:
-      reasoning: medium
-      coding: high
-      speed: very_high
-      context: high
-    suitable_for:
-      - coding
-      - testing
-      - verification
-      - file_search
-      - repository_exploration
-      - simple_debugging
-      - repetitive_tasks
 
   t9s/glm-5.2:
     provider: t9s
