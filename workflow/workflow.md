@@ -3,6 +3,8 @@ name: dispatching-multi-cli-workflows
 description: Use when one conversation should orchestrate independent sub-tasks across multiple background Claude sessions — triggers include task naturally decomposes, long verification loops would flood this session's context, workers need fresh isolated context, or parallel isolation.
 ---
 
+Entry point: fresh agents and post-compact recovery start at [`bootstrap.md`](bootstrap.md); the full rule index is [`rule-map.md`](rule-map.md). This file remains the normative methodology.
+
 # The Dispatch Mindset
 
 ## Core Principle  And Irontal Rules that you must obey.
@@ -51,14 +53,35 @@ Any ambiguity the prompt leaves open gets resolved by the model, not by you. Eve
 
 ## Dispatch Loop
 
-1. Write the spec as a file (single source of truth for all workers).
-2. Derive the worker prompt — self-contained, pinned session id, agreed output contract.
+1. Write the spec as a file (single source of truth for all workers): in the task directory when the task-state layout exists, otherwise in `handoffs/<task-name>/` of the working repo (one `SPEC-*.md` per task).
+2. Derive the worker prompt — self-contained, pinned session id, agreed output contract; prepend the standard block from [`worker-preamble.md`](worker-preamble.md).
 3. Launch workers; one log file each.
 4. Poll sparingly — liveness and latest assistant text, never busy-loop.
 5. On completion, dispatch a **verifier worker** (see below).
 6. Judge the verifier's evidence against acceptance. Accept, re-dispatch a fix worker, or escalate.
 
 Default structure: **sequential pipeline of isolated workers** (architecture → develop → verify), parallel only when units are truly independent.
+
+## High-Risk Reasoning Gate
+
+Most tasks fail from bad code; a minority fail from invalidated upstream reasoning silently propagating into correct-looking code. For that minority, use the reasoning-ledger mechanism (discussion-sync §9). The orchestrator decides ONCE, at Plan time, whether a task is high-risk:
+
+Hard triggers — any one makes the task high-risk:
+- The task will produce or modify formal derivations (equations, closed-form solutions, optimization objectives).
+- The task modifies core control / kinematics / dynamics / scheduling / concurrency algorithms.
+
+Soft indicators — two or more make it high-risk:
+- Results will chain through ≥2 derivation levels.
+- One wrong intermediate result would silently invalidate ≥2 downstream consumers.
+- The task is expected to span sessions or subagent handoffs.
+- Design "wiring" constraints (which signal feeds which computation) must survive implementation.
+
+Rules:
+- Judge by task structure, never by "the agent feels the task is complex".
+- Default is the normal workflow. The user may force either direction.
+- Record the decision as one line in task.md (or in the spec file for tasks without the task-state layout), e.g. `risk: high — triggers: H1, S3`.
+- High-risk tasks MUST use the task-state layout (task.md / state.md / decisions.md / evaluation.md / sync/) — for them it is mandatory, not opt-in — and follow the §9 reasoning protocol (ledger entries, verdicts, invalidation).
+- Workers of high-risk tasks receive a Reasoning State snapshot inside their prompt and MUST NOT modify symbols listed in state.md `## Blocked`; needing to touch one is an escalation trigger.
 
 ## Output Contract — The Worker Writes For You
 
@@ -114,7 +137,7 @@ The verifier returns per-claim verdicts with evidence (actual grep output, actua
 
 ## Model Selection
 
-Before starting a task, inspect `models.yaml` and select the appropriate model.
+Before starting a task, inspect `model.yaml` and select the appropriate model.
 
 ### Rules
 
@@ -139,3 +162,29 @@ model_selection:
   model: t9s/deepseek-v4-flash
   mode: automatic
   reason: coding_and_testing
+```
+
+## Discussion Session Sync (Opt-in)
+
+The Discussion Session and the Orchestrator Session serve different roles and should hold different context: the Discussion is where the human explores options freely, the Orchestrator is where committed state lives and work is dispatched. Letting the full Discussion back-and-forth flood the Orchestrator's context defeats the isolation goal of this workflow. The sync protocol bridges the two with file-only structured deltas — only confirmed Decisions, Constraints, Requirements, Progress, Open Questions, and Rejected alternatives cross the boundary, as numbered YAML payloads in the task's `sync/` directory.
+
+This is **opt-in and not a precondition**. A new task opts in by creating the task-state layout (`task.md`, `state.md`, `decisions.md`, `evaluation.md`, `sync/`); a task that does not create those files keeps using the legacy `SPEC-*.md + PROMPT-*` convention. Reaching for the sync protocol earns its keep only on tasks with real Discussion overhead — one-shot workers do not need it.
+
+```
+Discussion --/sync--> sync/NNN.yaml --ingest--> Orchestrator --> Task State
+  (human explores)    (file-only delta)        (reads pending)    (ledger)
+```
+
+- Protocol: [`discussion-sync/protocol.md`](discussion-sync/protocol.md)
+- Extractor prompt: [`discussion-sync/prompts/PROMPT-disc-extractor.md`](discussion-sync/prompts/PROMPT-disc-extractor.md)
+- Ingest prompt: [`discussion-sync/prompts/PROMPT-orch-ingest.md`](discussion-sync/prompts/PROMPT-orch-ingest.md)
+- Templates: [`discussion-sync/templates/`](discussion-sync/templates/)
+
+**Idempotency:** repeated `/sync` on the same Discussion state MUST NOT produce a new payload or mutate any ledger file; ingest rewrites a payload's `status:` to `applied` / `rejected` / `conflict` and never deletes it, so repeated ingest on a fully-applied task is a no-op.
+
+**Do not:**
+- No MCP server, no daemon, no file-watcher. The protocol is carried by markdown + yaml + prompts.
+- No retroactive migration of existing tasks under `workflow/handoffs/*` — they stay on the old convention.
+- No nested dispatch: the extractor and ingest prompts run inside their respective sessions; they do not spawn sub-processes.
+
+If a task trips the High-Risk Reasoning Gate (see above), the task-state layout is mandatory for that task rather than opt-in.
