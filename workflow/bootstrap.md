@@ -23,7 +23,7 @@ sessions. The normative methodology (铁律) is [`workflow.md`](workflow.md).
    (with line numbers) in your final message. Creating files outside the declared
    write-set is a contract violation.
 
-## Task classifier — three questions, in order
+## Task classifier — four questions, in order
 
 1. **Will you plan / dispatch / judge work?** → Read [`workflow.md`](workflow.md) in
    full before doing anything else.
@@ -33,8 +33,18 @@ sessions. The normative methodology (铁律) is [`workflow.md`](workflow.md).
    mandatory and the layout is not opt-in. Workers: symbols listed in the task's
    `state.md` under `## Blocked` are untouchable; needing to modify one is an
    ESCALATE trigger.
+4. **Will you write code that participates in a cross-boundary integration test?**
+   (multi-process, multi-machine, multi-protocol calls: frontend↔backend,
+   cloud↔robot, RPC, zenoh, Tauri invoke, WebSocket, IPC) → Read
+   [`agentflow/observability/README.md`](agentflow/observability/README.md) and the
+   component files it points to (`context.md`, `events.md`, `propagation.md`).
+   Your code MUST emit FAIL/ERROR/STATE events that satisfy the 8 traceability
+   checks in [`agentflow/observability/evidence.md`](agentflow/observability/evidence.md);
+   the verifier worker dispatched after you will adversarially check this. Adding
+   new mandatory fields/checks is additive; removing or relaxing one is an
+   ESCALATE trigger.
 
-No to all three → you are a plain worker; follow your prompt's output contract
+No to all four → you are a plain worker; follow your prompt's output contract
 (see workflow.md §Output Contract).
 
 ## Recovery after Auto-Compact / session restart

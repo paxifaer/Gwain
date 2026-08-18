@@ -107,6 +107,35 @@ The verifier returns per-claim verdicts with evidence (actual grep output, actua
 
 **Recursion floor:** at minimum there are two free agents (worker, verifier) and one judgment (your decision). Spawning a third session to verify the verifier is reserved for high-stakes acceptances.
 
+## Integration Traceability Contract
+
+When a worker writes code that participates in a cross-boundary integration
+test (multi-process, multi-machine, multi-protocol calls: frontend↔backend,
+cloud↔robot, RPC, zenoh, Tauri invoke, WebSocket, IPC), the code MUST emit
+FAIL/ERROR/STATE events that satisfy the Integration Traceability Contract
+at [`agentflow/observability/`](agentflow/observability/README.md).
+
+The submodule owns the *how* — field model (8 common fields + event-specific),
+propagation (correlation_id across 6 transports, run_id via env, attempt
+semantics), event taxonomy, **first-failure principle** (first_failure vs
+downstream_failures vs final_failure), and the 8 verifier checks. The
+workflow layer owns the *policy* — when to log, which scenes require which
+points, whether real dependencies are exercised, whether a FAIL is a test
+failure. The boundary is documented in the submodule's README.
+
+The verifier worker dispatched after an integration-test task uses
+[`agentflow/observability/evidence.md`](agentflow/observability/evidence.md)
+as its adversarial checklist (8 traceability checks, each with a bypass
+vector a strong worker might use to fake compliance and the countermeasure
+that catches it). The orchestrator never greps logs itself — the
+traceability check is dispatched as a verifier session, same as any other
+verification work (see §Verification above).
+
+Adding a new mandatory field or check is additive only and requires bumping
+the "8 verifier checks" count in both `agentflow/observability/README.md`
+and `evidence.md`. Removing or relaxing a check is an ESCALATE trigger
+per `bootstrap.md` — the contract is intentionally sticky.
+
 ## When to Escalate
 
 - Worker or verifier is blocked on a judgment call the prompt didn't cover
