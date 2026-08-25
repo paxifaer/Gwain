@@ -28,8 +28,8 @@ Gawain 不再与 Claude Code、Codex、DeepSeek Harness 竞争任务分发、会
   `gawain-canary.service`；
 - 生命周期服务 ID：`gawain-canary`；
 - 动作：`Restart`；
-- 用户路径：真实 Tauri 应用中的前端按钮，经 Tauri command/IPC、lifecycle
-  专用接口、ArgoGateway、Backend 到真机 systemd，再由状态流返回前端；
+- 用户路径：真实 Tauri 应用中的前端按钮，经现有 Tauri mTLS proxy command/IPC、
+  lifecycle 专用接口、ArgoGateway、Backend 到真机 systemd，再由状态流返回前端；
 - 自动成功终态：`READY_FOR_HUMAN_ACCEPTANCE`，不等于用户最终验收。
 
 首轮不直接操作 `nav-runtime`。只有 canary Pilot 稳定后，第二阶段才用相同
@@ -190,11 +190,13 @@ PID 变化只是辅助 oracle，因为 PID 可能复用。generation 变化、sy
 
 ### 5.4 Tauri 边界的诚实定义
 
-当前 renderer 直接使用 gateway client 时，“应用运行在 Tauri WebView 中”并不等于
-请求经过了 Tauri Rust IPC。因为本 Pilot 已冻结的目标链路明确包含 Tauri，生命周期
-请求必须改由 Tauri command/IPC 转发，trace 中必须存在真实的 Tauri client/server
-spans。保留 renderer 直连只能作为低层诊断路径，不能满足 P-01，也不得生成假的 Tauri
-span。真实 Tauri 应用交互不能用普通浏览器测试替代。
+SP000065 使用 `https://192.168.110.65:50053`。现有 gateway transport 会把这类
+allowlisted LAN mTLS 请求转入 Tauri 的 `gateway_mtls_proxy`，状态订阅则经过
+`gateway_mtls_proxy_stream`，所以目标路径已经真实穿过 Tauri Rust IPC，不需要再新增
+一个 lifecycle 专用 Tauri command。Pilot 要补的是这些现有 IPC 的 W3C client/server
+spans，并证明 unary 请求和 streaming 状态回流都走过 Tauri。普通浏览器、plaintext
+或关闭 mTLS proxy 的开发模式只能作为低层诊断，不能满足 P-01，也不得生成假的 Tauri
+span。
 
 ## 6. 必需测试矩阵
 
@@ -255,7 +257,7 @@ P-01 至少需要以下逻辑 spans：
 ```text
 gawain.test_case
   -> frontend.renderer.action
-     -> tauri.ipc.command
+     -> tauri.gateway_mtls_proxy
         -> argogateway.lifecycle_execute
            -> backend.lifecycle_control
               -> systemd.restart
