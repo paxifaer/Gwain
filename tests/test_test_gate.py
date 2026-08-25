@@ -2,6 +2,7 @@ from copy import deepcopy
 
 import pytest
 
+import gawain_verification.test_gate as test_gate_module
 from gawain_verification.schema import validate_schema
 from gawain_verification.test_gate import validate_tests
 
@@ -605,11 +606,44 @@ def test_oracle_accepts_maximum_aggregate_json_nodes(valid_test_bundle):
     assert validate_tests(valid_test_bundle) == []
 
 
-def test_oracle_rejects_oversized_aggregate_json_value(valid_test_bundle):
-    value = [None] * 10_000
+@pytest.mark.parametrize(
+    "value",
+    [
+        [None] * 10_000,
+        {f"key-{index}": None for index in range(10_000)},
+    ],
+    ids=["wide-list", "wide-dict"],
+)
+def test_oracle_rejects_oversized_aggregate_json_value(valid_test_bundle, value):
     set_oracle_values(valid_test_bundle, value, value)
 
     assert "invalid_oracle" in codes(valid_test_bundle)
+
+
+class ExplodingEquality:
+    def __eq__(self, other):
+        raise AssertionError("oversized children must not be compared")
+
+    def __ne__(self, other):
+        raise AssertionError("oversized children must not be compared")
+
+
+@pytest.mark.parametrize("container_kind", ["list", "dict"])
+def test_bounded_equality_preflights_wide_containers_before_children(
+    container_kind,
+):
+    if container_kind == "list":
+        left = [ExplodingEquality() for _ in range(10_000)]
+        right = [ExplodingEquality() for _ in range(10_000)]
+    else:
+        left = {
+            f"key-{index}": ExplodingEquality() for index in range(10_000)
+        }
+        right = {
+            f"key-{index}": ExplodingEquality() for index in range(10_000)
+        }
+
+    assert test_gate_module._bounded_json_equal(left, right) is False
 
 
 def test_environment_fingerprint_must_be_lowercase_sha256(valid_test_bundle):

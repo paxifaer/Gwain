@@ -92,14 +92,21 @@ def _artifact_kinds(
 
 
 def _is_bounded_json_value(value: object) -> bool:
-    stack: list[tuple[bool, object, int]] = [(True, value, 0)]
+    stack: list[tuple[str, object, int]] = [("value", value, 0)]
     active_containers: set[int] = set()
     node_count = 0
 
     while stack:
-        entering, current, depth = stack.pop()
-        if not entering:
-            active_containers.remove(id(current))
+        action, current, depth = stack.pop()
+        if action == "children":
+            iterator, identity = current
+            try:
+                child = next(iterator)
+            except StopIteration:
+                active_containers.remove(identity)
+                continue
+            stack.append(("children", current, depth))
+            stack.append(("value", child, depth))
             continue
 
         node_count += 1
@@ -111,30 +118,43 @@ def _is_bounded_json_value(value: object) -> bool:
             if not math.isfinite(current):
                 return False
             continue
+        if type(current) not in {list, dict}:
+            return False
+        remaining_budget = MAX_ORACLE_JSON_NODES - node_count
+        if len(current) > remaining_budget:
+            return False
         if type(current) is list:
-            children = current
-        elif type(current) is dict:
+            children = iter(current)
+        else:
             if not all(type(key) is str for key in current):
                 return False
-            children = list(current.values())
-        else:
-            return False
+            children = iter(current.values())
 
         identity = id(current)
         if identity in active_containers:
             return False
         active_containers.add(identity)
-        stack.append((False, current, depth))
-        stack.extend((True, child, depth + 1) for child in reversed(children))
+        stack.append(("children", (children, identity), depth + 1))
 
     return True
 
 
 def _bounded_json_equal(left: object, right: object) -> bool:
-    stack: list[tuple[object, object, int]] = [(left, right, 0)]
+    stack: list[tuple[str, object, int]] = [("values", (left, right), 0)]
     node_count = 0
     while stack:
-        left_value, right_value, depth = stack.pop()
+        action, current, depth = stack.pop()
+        if action == "children":
+            iterator = current
+            try:
+                pair = next(iterator)
+            except StopIteration:
+                continue
+            stack.append(("children", iterator, depth))
+            stack.append(("values", pair, depth))
+            continue
+
+        left_value, right_value = current
         node_count += 1
         if node_count > MAX_ORACLE_JSON_NODES or depth > MAX_ORACLE_JSON_DEPTH:
             return False
@@ -143,21 +163,26 @@ def _bounded_json_equal(left: object, right: object) -> bool:
         if type(left_value) is list:
             if len(left_value) != len(right_value):
                 return False
-            stack.extend(
-                (left_item, right_item, depth + 1)
-                for left_item, right_item in zip(
-                    reversed(left_value), reversed(right_value)
-                )
-            )
+            child_count = len(left_value)
+            if child_count > MAX_ORACLE_JSON_NODES - node_count:
+                return False
+            children = zip(left_value, right_value)
         elif type(left_value) is dict:
+            child_count = len(left_value)
+            if child_count != len(right_value):
+                return False
+            if child_count > MAX_ORACLE_JSON_NODES - node_count:
+                return False
             if left_value.keys() != right_value.keys():
                 return False
-            stack.extend(
-                (left_value[key], right_value[key], depth + 1)
-                for key in reversed(left_value)
+            children = (
+                (left_value[key], right_value[key]) for key in left_value
             )
-        elif left_value != right_value:
-            return False
+        else:
+            if left_value != right_value:
+                return False
+            continue
+        stack.append(("children", children, depth + 1))
     return True
 
 
