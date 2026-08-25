@@ -1,4 +1,5 @@
 from copy import deepcopy
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -98,3 +99,29 @@ def bundle_root(tmp_path: Path) -> Path:
 @pytest.fixture
 def cloned():
     return deepcopy
+
+
+@pytest.fixture
+def valid_artifact_bundle(tmp_path: Path) -> dict[str, object]:
+    artifact_id = "artifact-evidence-json"
+    artifact_path = tmp_path / "artifacts" / "evidence.json"
+    artifact_path.parent.mkdir()
+    content = b'{"result":"verified"}\n'
+    artifact_path.write_bytes(content)
+
+    evidence = {"evidence": [artifact_id]}
+    return {
+        "artifacts": [
+            {
+                "artifact_id": artifact_id,
+                "path": "artifacts/evidence.json",
+                "bytes": len(content),
+                "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+            }
+        ],
+        "tests": [deepcopy(evidence)],
+        "claims": [deepcopy(evidence)],
+        "traces": [deepcopy(evidence)],
+        "environment": deepcopy(evidence),
+        "deployment": deepcopy(evidence),
+    }
