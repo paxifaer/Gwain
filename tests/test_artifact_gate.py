@@ -562,10 +562,11 @@ def test_evidence_bundle_schema_closes_artifact_records(
     bundle = {
         "schema_version": "gawain.evidence-bundle.v1",
         "run_id": "run-artifact-schema",
+        "run": {"status": "COMPLETED"},
         "contract": valid_contract,
         "candidate": valid_candidate,
         "permit": valid_permit,
-        "verdict": {},
+        "verdict": {"status": "INCONCLUSIVE"},
         **valid_artifact_bundle,
     }
     assert validate_schema(bundle, "evidence-bundle.v1.schema.json") == []
@@ -592,10 +593,11 @@ def test_evidence_bundle_schema_rejects_invalid_artifact_fields(
     bundle = {
         "schema_version": "gawain.evidence-bundle.v1",
         "run_id": "run-artifact-schema",
+        "run": {"status": "COMPLETED"},
         "contract": valid_contract,
         "candidate": valid_candidate,
         "permit": valid_permit,
-        "verdict": {},
+        "verdict": {"status": "INCONCLUSIVE"},
         **valid_artifact_bundle,
     }
     bundle["artifacts"][0][field] = value

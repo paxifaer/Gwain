@@ -22,6 +22,12 @@ def valid_contract() -> dict[str, object]:
         "systemd_scope": "user",
         "action": "Restart",
         "success_terminal": "READY_FOR_HUMAN_ACCEPTANCE",
+        "required_claims": [
+            "restart-path-correlated",
+            "negative-cases-rejected",
+            "deployed-digests-bound",
+            "causal-trace-complete",
+        ],
         "required_test_cases": [
             {
                 "id": "P-01",
@@ -236,7 +242,13 @@ def valid_artifact_bundle(tmp_path: Path) -> dict[str, object]:
             }
         ],
         "tests": [deepcopy(test_evidence)],
-        "claims": [deepcopy(evidence)],
+        "claims": [
+            {
+                "id": "restart-path-correlated",
+                "status": "PROVEN",
+                **deepcopy(evidence),
+            }
+        ],
         "traces": [deepcopy(evidence)],
         "environment": deepcopy(evidence),
         "deployment": deepcopy(evidence),
@@ -305,4 +317,61 @@ def valid_test_bundle() -> dict[str, object]:
                 "evidence": [tauri_artifact_id, trace_artifact_id],
             }
         ],
+    }
+
+
+@pytest.fixture
+def valid_verdict_bundle(valid_contract, valid_candidate, valid_permit):
+    artifact_id = "artifact-verdict-evidence"
+    tests = []
+    for requirement in valid_contract["required_test_cases"]:
+        expected_outcome = requirement["expected_outcome"]
+        tests.append(
+            {
+                "id": requirement["id"],
+                "required_level": requirement["required_level"],
+                "observed_level": requirement["required_level"],
+                "expected_outcome": expected_outcome,
+                "status": "PASS" if expected_outcome == "PASS" else "EXPECTED_REJECT",
+                "command": f"pytest -q -k {requirement['id']}",
+                "cwd": "/workspace",
+                "environment_fingerprint": "sha256:" + "0" * 64,
+                "expected_test_count": 1,
+                "executed_test_count": 1,
+                "passed_test_count": 1,
+                "failed_test_count": 0,
+                "ignored_test_count": 0,
+                "exit_code": 0,
+                "oracle": {
+                    **deepcopy(requirement["oracle"]),
+                    "observed": requirement["oracle"]["expected"],
+                    "passed": True,
+                },
+                "evidence": [artifact_id],
+            }
+        )
+    return {
+        "schema_version": "gawain.evidence-bundle.v1",
+        "run_id": "run-verdict-001",
+        "run": {"status": "COMPLETED"},
+        "contract": deepcopy(valid_contract),
+        "candidate": deepcopy(valid_candidate),
+        "permit": deepcopy(valid_permit),
+        "environment": {},
+        "artifacts": [
+            {
+                "artifact_id": artifact_id,
+                "kind": "test-evidence",
+                "path": "artifacts/verdict.json",
+                "bytes": 1,
+                "sha256": "sha256:" + "9" * 64,
+            }
+        ],
+        "tests": tests,
+        "claims": [
+            {"id": claim_id, "status": "PROVEN", "evidence": [artifact_id]}
+            for claim_id in valid_contract["required_claims"]
+        ],
+        "traces": [],
+        "verdict": {"status": "READY_FOR_HUMAN_ACCEPTANCE"},
     }

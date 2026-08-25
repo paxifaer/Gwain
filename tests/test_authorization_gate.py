@@ -532,6 +532,7 @@ def test_evidence_bundle_schema_is_closed_at_top_level(valid_contract):
     bundle = {
         "schema_version": "gawain.evidence-bundle.v1",
         "run_id": "run-example_1",
+        "run": {"status": "COMPLETED"},
         "contract": valid_contract,
         "candidate": {},
         "permit": {},
@@ -540,7 +541,7 @@ def test_evidence_bundle_schema_is_closed_at_top_level(valid_contract):
         "tests": [],
         "claims": [],
         "traces": [],
-        "verdict": {},
+        "verdict": {"status": "INCONCLUSIVE"},
         "unexpected": True,
     }
 

@@ -712,12 +712,13 @@ def test_evidence_bundle_schema_closes_test_and_artifact_records(
     bundle = {
         "schema_version": "gawain.evidence-bundle.v1",
         "run_id": "run-test-schema",
+        "run": {"status": "COMPLETED"},
         "candidate": valid_candidate,
         "permit": valid_permit,
         "environment": {},
         "claims": [],
         "traces": [],
-        "verdict": {},
+        "verdict": {"status": "INCONCLUSIVE"},
         **valid_test_bundle,
     }
     assert validate_schema(bundle, "evidence-bundle.v1.schema.json") == []
@@ -760,12 +761,13 @@ def test_evidence_bundle_schema_rejects_invalid_test_fields(
     bundle = {
         "schema_version": "gawain.evidence-bundle.v1",
         "run_id": "run-test-schema",
+        "run": {"status": "COMPLETED"},
         "candidate": valid_candidate,
         "permit": valid_permit,
         "environment": {},
         "claims": [],
         "traces": [],
-        "verdict": {},
+        "verdict": {"status": "INCONCLUSIVE"},
         **valid_test_bundle,
     }
     bundle["tests"][0][field] = value
@@ -825,12 +827,13 @@ def test_evidence_bundle_schema_rejects_invalid_oracle_shape(
     bundle = {
         "schema_version": "gawain.evidence-bundle.v1",
         "run_id": "run-test-schema",
+        "run": {"status": "COMPLETED"},
         "candidate": valid_candidate,
         "permit": valid_permit,
         "environment": {},
         "claims": [],
         "traces": [],
-        "verdict": {},
+        "verdict": {"status": "INCONCLUSIVE"},
         **valid_test_bundle,
     }
     bundle["tests"][0]["oracle"] = oracle
@@ -847,12 +850,13 @@ def test_schema_allows_false_passed_for_independent_oracle_evaluation(
     bundle = {
         "schema_version": "gawain.evidence-bundle.v1",
         "run_id": "run-test-schema",
+        "run": {"status": "COMPLETED"},
         "candidate": valid_candidate,
         "permit": valid_permit,
         "environment": {},
         "claims": [],
         "traces": [],
-        "verdict": {},
+        "verdict": {"status": "INCONCLUSIVE"},
         **valid_test_bundle,
     }
 
@@ -866,12 +870,13 @@ def test_evidence_bundle_schema_requires_artifact_kind(
     bundle = {
         "schema_version": "gawain.evidence-bundle.v1",
         "run_id": "run-test-schema",
+        "run": {"status": "COMPLETED"},
         "candidate": valid_candidate,
         "permit": valid_permit,
         "environment": {},
         "claims": [],
         "traces": [],
-        "verdict": {},
+        "verdict": {"status": "INCONCLUSIVE"},
         **valid_test_bundle,
     }
     del bundle["artifacts"][0]["kind"]

@@ -16,7 +16,8 @@
     "systemd_scope",
     "action",
     "success_terminal",
-    "required_test_cases"
+    "required_test_cases",
+    "required_claims"
   ],
   "properties": {
     "schema_version": {"const": "gawain.verification-contract.v1"},
@@ -31,6 +32,12 @@
     "systemd_scope": {"type": "string", "minLength": 1},
     "action": {"type": "string", "minLength": 1},
     "success_terminal": {"const": "READY_FOR_HUMAN_ACCEPTANCE"},
+    "required_claims": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "\\S"}
+    },
     "required_test_cases": {
       "type": "array",
       "minItems": 1,
