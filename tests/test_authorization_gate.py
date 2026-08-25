@@ -567,9 +567,44 @@ def test_schema_name_is_closed_and_cannot_traverse(schema_name):
         (
             "unknown_schema",
             "schema_name",
-            f"unsupported schema name: {schema_name}",
+            "unsupported schema name",
         )
     ]
+
+
+class HostileSchemaName(str):
+    def __hash__(self):
+        raise AssertionError("schema selector must not hash str subclasses")
+
+
+class HostileNonStringSchemaName:
+    def __str__(self):
+        raise AssertionError("schema selector must not be stringified")
+
+
+@pytest.mark.parametrize(
+    "schema_name",
+    [
+        pytest.param(
+            HostileSchemaName("verification-contract.v1.schema.json"),
+            id="str-subclass",
+        ),
+        pytest.param(HostileNonStringSchemaName(), id="hostile-non-string"),
+        pytest.param("x" * (1024 * 1024), id="oversized"),
+        pytest.param("credential-bearing-unknown-schema", id="secret-bearing"),
+    ],
+)
+def test_schema_selector_rejection_is_fixed_bounded_and_nonobserving(schema_name):
+    found = validate_schema({}, schema_name)
+
+    assert [
+        (problem.code, problem.location, problem.message) for problem in found
+    ] == [("unknown_schema", "schema_name", "unsupported schema name")]
+    assert "credential" not in repr(found)
+    assert all(
+        len(problem.location) <= 128 and len(problem.message) <= 128
+        for problem in found
+    )
 
 
 def test_static_schemas_are_valid_draft_2020_12_schemas():

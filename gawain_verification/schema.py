@@ -30,6 +30,7 @@ MAX_SCHEMA_STRING_LENGTH = 1024 * 1024
 MAX_SCHEMA_ISSUES = 256
 MAX_SCHEMA_LOCATION_LENGTH = 128
 MAX_SCHEMA_LOCATION_COMPONENT_LENGTH = 64
+MAX_SCHEMA_SELECTOR_LENGTH = 128
 _VALIDATOR_KEYWORDS = frozenset(
     {
         "additionalProperties",
@@ -192,12 +193,16 @@ def _schema_failure_issue() -> ValidationIssue:
 
 
 def validate_schema(instance: Any, schema_name: str) -> list[ValidationIssue]:
-    if not isinstance(schema_name, str) or schema_name not in _SCHEMA_RESOURCES:
+    if (
+        type(schema_name) is not str
+        or len(schema_name) > MAX_SCHEMA_SELECTOR_LENGTH
+        or schema_name not in _SCHEMA_RESOURCES
+    ):
         return [
             issue(
                 "unknown_schema",
                 "schema_name",
-                f"unsupported schema name: {schema_name}",
+                "unsupported schema name",
             )
         ]
     if not _is_safe_json_tree(instance):
