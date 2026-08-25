@@ -486,6 +486,48 @@ def test_valid_human_acceptance_does_not_change_verdict(valid_verdict_bundle):
     assert validate(valid_verdict_bundle) == []
 
 
+@pytest.mark.parametrize("decision", ["ACCEPTED", "REJECTED"])
+@pytest.mark.parametrize(
+    "terminal",
+    ["ABORTED", "ENV_INVALID", "BLOCKED_INFRA", "INCONCLUSIVE", "FAIL"],
+)
+def test_human_acceptance_requires_independently_ready_verdict(
+    valid_verdict_bundle, terminal, decision
+):
+    kwargs = {}
+    if terminal == "ABORTED":
+        valid_verdict_bundle["run"]["status"] = "ABORTED"
+    elif terminal == "ENV_INVALID":
+        kwargs["identity_issues"] = [issue("identity", "gate", "invalid")]
+    elif terminal == "BLOCKED_INFRA":
+        valid_verdict_bundle["run"]["status"] = "BLOCKED_INFRA"
+    elif terminal == "INCONCLUSIVE":
+        valid_verdict_bundle["claims"][0]["status"] = "INCONCLUSIVE"
+    else:
+        valid_verdict_bundle["claims"][0]["status"] = "DISPROVEN"
+    acceptance = valid_acceptance(valid_verdict_bundle)
+    acceptance["decision"] = decision
+    valid_verdict_bundle["human_acceptance"] = acceptance
+    valid_verdict_bundle["verdict"]["status"] = terminal
+
+    found = validate(valid_verdict_bundle, **kwargs)
+
+    assert "human_acceptance_not_ready" in [problem.code for problem in found]
+    assert "verdict_mismatch" not in [problem.code for problem in found]
+
+
+def test_malformed_acceptance_on_nonready_reports_both_issues(valid_verdict_bundle):
+    valid_verdict_bundle["run"]["status"] = "BLOCKED_INFRA"
+    valid_verdict_bundle["verdict"]["status"] = "BLOCKED_INFRA"
+    acceptance = valid_acceptance(valid_verdict_bundle)
+    acceptance["decision"] = []
+    valid_verdict_bundle["human_acceptance"] = acceptance
+
+    assert {"invalid_human_acceptance", "human_acceptance_not_ready"}.issubset(
+        set(codes(valid_verdict_bundle))
+    )
+
+
 def test_human_acceptance_is_bound_to_run(valid_verdict_bundle):
     acceptance = valid_acceptance(valid_verdict_bundle)
     acceptance["run_id"] = "run-other"
@@ -523,7 +565,9 @@ def test_utc_fraction_is_limited_to_six_digits(
 
     found = validate(valid_verdict_bundle)
     if valid:
-        assert found == []
+        assert [problem.code for problem in found] == [
+            "human_acceptance_not_ready"
+        ]
     else:
         assert {"invalid_waiver_time", "invalid_human_acceptance"}.issubset(
             {problem.code for problem in found}
@@ -784,3 +828,86 @@ def test_evidence_schema_closes_waiver_and_human_acceptance(valid_verdict_bundle
         for problem in validate_schema(valid_verdict_bundle, "evidence-bundle.v1.schema.json")
     }
     assert {"$.waivers[0]", "$.human_acceptance"}.issubset(locations)
+
+
+def test_schema_rejects_human_acceptance_with_claimed_nonready_verdict(
+    valid_verdict_bundle
+):
+    valid_verdict_bundle["human_acceptance"] = valid_acceptance(valid_verdict_bundle)
+    valid_verdict_bundle["verdict"]["status"] = "FAIL"
+
+    assert validate_schema(valid_verdict_bundle, "evidence-bundle.v1.schema.json")
+
+
+def set_first_oracle(bundle, value):
+    requirement_oracle = bundle["contract"]["required_test_cases"][0]["oracle"]
+    record_oracle = bundle["tests"][0]["oracle"]
+    requirement_oracle["expected"] = deepcopy(value)
+    record_oracle["expected"] = deepcopy(value)
+    record_oracle["observed"] = deepcopy(value)
+    record_oracle["passed"] = True
+
+
+@pytest.mark.parametrize(
+    ("value_factory", "accepted"),
+    [
+        (lambda: {"nested": ["x" * 512]}, True),
+        (lambda: {"nested": ["x" * 513]}, False),
+        (lambda: [True] * 2048, True),
+        (lambda: [True] * 2049, False),
+        (lambda: {f"key-{index}": True for index in range(2048)}, True),
+        (lambda: {f"key-{index}": True for index in range(2049)}, False),
+    ],
+)
+def test_oracle_schema_and_runtime_collection_boundaries(
+    valid_verdict_bundle, value_factory, accepted
+):
+    set_first_oracle(valid_verdict_bundle, value_factory())
+
+    contract_issues = validate_schema(
+        valid_verdict_bundle["contract"], "verification-contract.v1.schema.json"
+    )
+    bundle_issues = validate_schema(
+        valid_verdict_bundle, "evidence-bundle.v1.schema.json"
+    )
+    if accepted:
+        assert contract_issues == []
+        assert bundle_issues == []
+        assert validate(valid_verdict_bundle) == []
+    else:
+        assert contract_issues
+        assert bundle_issues
+        valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+        assert "test_gate_failed" in codes(valid_verdict_bundle)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="infinity"),
+    ],
+)
+def test_runtime_rejects_nonfinite_oracle_numbers(valid_verdict_bundle, value):
+    set_first_oracle(valid_verdict_bundle, value)
+    valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+
+    assert "test_gate_failed" in codes(valid_verdict_bundle)
+
+
+def test_runtime_rejects_oracle_depth_beyond_gate_limit(valid_verdict_bundle):
+    value = True
+    for _ in range(66):
+        value = [value]
+    set_first_oracle(valid_verdict_bundle, value)
+    valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+
+    assert "test_gate_failed" in codes(valid_verdict_bundle)
+
+
+def test_runtime_rejects_oracle_global_node_budget(valid_verdict_bundle):
+    value = [[True] * 100 for _ in range(101)]
+    set_first_oracle(valid_verdict_bundle, value)
+    valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+
+    assert "test_gate_failed" in codes(valid_verdict_bundle)

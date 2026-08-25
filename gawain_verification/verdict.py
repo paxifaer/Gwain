@@ -615,6 +615,17 @@ def validate_verdict(
         candidate_failed=candidate_failed,
         all_obligations_proven=all_obligations_proven,
     )
+    if (
+        "human_acceptance" in bundle
+        and derived != "READY_FOR_HUMAN_ACCEPTANCE"
+    ):
+        problems.append(
+            issue(
+                "human_acceptance_not_ready",
+                "human_acceptance",
+                "human acceptance requires a ready verifier verdict",
+            )
+        )
     verdict = bundle.get("verdict")
     claimed = verdict.get("status") if type(verdict) is dict else None
     verdict_valid = (

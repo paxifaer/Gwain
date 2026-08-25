@@ -539,6 +539,20 @@ def test_oracle_equality_distinguishes_true_from_one(valid_test_bundle):
     assert "oracle_result_failed" in codes(valid_test_bundle)
 
 
+def test_bounded_oracle_equality_captures_each_dict_child_pair():
+    left = {"first": True, "second": False}
+    right = deepcopy(left)
+
+    assert test_gate_module._bounded_json_equal(left, right) is True
+
+
+def test_oracle_accepts_schema_maximum_object_properties(valid_test_bundle):
+    value = {f"key-{index}": True for index in range(2_048)}
+    set_oracle_values(valid_test_bundle, value, deepcopy(value))
+
+    assert validate_tests(valid_test_bundle) == []
+
+
 def nested_value(depth):
     value = True
     for _ in range(depth):

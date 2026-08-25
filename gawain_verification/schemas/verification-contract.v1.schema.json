@@ -1,6 +1,29 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://gawain.local/schemas/verification-contract.v1.schema.json",
+  "$defs": {
+    "boundedJson": {
+      "$comment": "Maximum depth, global node budgets, and finite-number strictness are enforced by the strict JSON parser and runtime because Draft 2020-12 cannot fully express global budgets.",
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "integer"},
+        {"type": "number", "not": {"type": "integer"}},
+        {"type": "string", "maxLength": 512},
+        {
+          "type": "array",
+          "maxItems": 2048,
+          "items": {"$ref": "#/$defs/boundedJson"}
+        },
+        {
+          "type": "object",
+          "maxProperties": 2048,
+          "propertyNames": {"maxLength": 512},
+          "additionalProperties": {"$ref": "#/$defs/boundedJson"}
+        }
+      ]
+    }
+  },
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -62,7 +85,10 @@
             "properties": {
               "assertion": {"type": "string", "maxLength": 512, "pattern": "\\S"},
               "operator": {"const": "equals"},
-              "expected": {"not": {"type": "null"}}
+              "expected": {
+                "$ref": "#/$defs/boundedJson",
+                "not": {"type": "null"}
+              }
             }
           }
         }

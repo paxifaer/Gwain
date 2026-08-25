@@ -175,8 +175,8 @@ def _bounded_json_equal(left: object, right: object) -> bool:
                 return False
             if left_value.keys() != right_value.keys():
                 return False
-            children = (
-                (left_value[key], right_value[key]) for key in left_value
+            children = zip(
+                left_value.values(), map(right_value.__getitem__, left_value)
             )
         else:
             if left_value != right_value:

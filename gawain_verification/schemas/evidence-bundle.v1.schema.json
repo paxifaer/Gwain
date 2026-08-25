@@ -1,8 +1,52 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://gawain.local/schemas/evidence-bundle.v1.schema.json",
+  "$defs": {
+    "boundedJson": {
+      "$comment": "Maximum depth, global node budgets, and finite-number strictness are enforced by the strict JSON parser and runtime because Draft 2020-12 cannot fully express global budgets.",
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "integer"},
+        {"type": "number", "not": {"type": "integer"}},
+        {"type": "string", "maxLength": 512},
+        {
+          "type": "array",
+          "maxItems": 2048,
+          "items": {"$ref": "#/$defs/boundedJson"}
+        },
+        {
+          "type": "object",
+          "maxProperties": 2048,
+          "propertyNames": {"maxLength": 512},
+          "additionalProperties": {"$ref": "#/$defs/boundedJson"}
+        }
+      ]
+    }
+  },
   "type": "object",
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "verdict": {
+            "type": "object",
+            "required": ["status"],
+            "properties": {
+              "status": {
+                "not": {"const": "READY_FOR_HUMAN_ACCEPTANCE"}
+              }
+            }
+          }
+        },
+        "required": ["verdict"]
+      },
+      "then": {
+        "not": {"required": ["human_acceptance"]}
+      }
+    }
+  ],
   "required": [
     "schema_version",
     "run_id",
@@ -98,8 +142,14 @@
             "properties": {
               "assertion": {"type": "string", "maxLength": 512, "pattern": "\\S"},
               "operator": {"const": "equals"},
-              "expected": {"not": {"type": "null"}},
-              "observed": {"not": {"type": "null"}},
+              "expected": {
+                "$ref": "#/$defs/boundedJson",
+                "not": {"type": "null"}
+              },
+              "observed": {
+                "$ref": "#/$defs/boundedJson",
+                "not": {"type": "null"}
+              },
               "passed": {"type": "boolean"}
             }
           },
