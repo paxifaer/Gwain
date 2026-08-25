@@ -200,11 +200,13 @@ def _validate_claims(
     structurally_valid = True
     for index, record in enumerate(records):
         evidence = record.get("evidence") if type(record) is dict else None
+        status = record.get("status") if type(record) is dict else None
         if not (
             type(record) is dict
             and set(record) == {"id", "status", "evidence"}
             and _nonempty_text(record.get("id"))
-            and record.get("status") in CLAIM_STATUSES
+            and isinstance(status, str)
+            and status in CLAIM_STATUSES
             and type(evidence) is list
             and bool(evidence)
             and all(_nonempty_text(value) for value in evidence)
@@ -219,7 +221,7 @@ def _validate_claims(
             )
             structurally_valid = False
             continue
-        valid.append((record["id"], record["status"]))
+        valid.append((record["id"], status))
     counts = Counter(claim_id for claim_id, _ in valid)
     required_set = set(required)
     for claim_id in required:
@@ -261,9 +263,11 @@ def _validate_waivers(
         basic_valid = (
             type(record) is dict
             and set(record) == expected_fields
+            and isinstance(record.get("author_kind"), str)
             and record.get("author_kind") == "human"
             and _nonempty_text(record.get("author"))
             and _nonempty_text(record.get("reason"))
+            and isinstance(record.get("policy_version"), str)
             and record.get("policy_version") == "gawain.waiver-policy.v1"
             and type(scope) is list
             and bool(scope)
@@ -302,9 +306,11 @@ def _validate_acceptance(
     valid = (
         type(record) is dict
         and set(record) == expected_fields
+        and isinstance(record.get("author_kind"), str)
         and record.get("author_kind") == "human"
         and _nonempty_text(record.get("author"))
         and _nonempty_text(record.get("reason"))
+        and isinstance(record.get("decision"), str)
         and record.get("decision") in {"ACCEPTED", "REJECTED"}
         and _utc_time(record.get("recorded_at")) is not None
         and isinstance(record.get("contract_id"), str)
@@ -353,24 +359,21 @@ def validate_verdict(
     claims_valid, statuses = _validate_claims(bundle, required_claims, problems)
 
     run = bundle.get("run")
-    run_valid = type(run) is dict and set(run) == {"status"} and run.get("status") in RUN_STATUSES
+    raw_run_status = run.get("status") if type(run) is dict else None
+    run_valid = (
+        type(run) is dict
+        and set(run) == {"status"}
+        and isinstance(raw_run_status, str)
+        and raw_run_status in RUN_STATUSES
+    )
     if not run_valid:
         problems.append(issue("invalid_run", "run", "run must have one closed terminal status"))
-    run_status = run.get("status") if run_valid else None
+    run_status = raw_run_status if run_valid else None
 
     waiver_valid, has_waiver = _validate_waivers(
         bundle, set(required_claims) | set(required_tests), now, problems
     )
     _validate_acceptance(bundle, problems)
-
-    verdict = bundle.get("verdict")
-    verdict_valid = (
-        type(verdict) is dict
-        and set(verdict) == {"status"}
-        and verdict.get("status") in VERDICTS
-    )
-    if not verdict_valid:
-        problems.append(issue("invalid_verdict", "verdict", "verdict must contain one closed status"))
 
     prerequisites_clear = not (identity_bad or artifact_bad or test_bad or trace_bad)
     # A valid waiver is separate evidence and only blocks READY below. An invalid
@@ -382,7 +385,6 @@ def validate_verdict(
         and claims_valid
         and run_valid
         and waiver_valid
-        and verdict_valid
         and not (artifact_bad or test_bad or trace_bad)
     )
     candidate_failed = claims_valid and any(
@@ -406,7 +408,16 @@ def validate_verdict(
         candidate_failed=candidate_failed,
         all_obligations_proven=all_obligations_proven,
     )
+    verdict = bundle.get("verdict")
     claimed = verdict.get("status") if type(verdict) is dict else None
+    verdict_valid = (
+        type(verdict) is dict
+        and set(verdict) == {"status"}
+        and isinstance(claimed, str)
+        and claimed in VERDICTS
+    )
+    if not verdict_valid:
+        problems.append(issue("invalid_verdict", "verdict", "verdict must contain one closed status"))
     if claimed != derived:
         problems.append(
             issue(

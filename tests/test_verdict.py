@@ -121,7 +121,97 @@ def test_illegal_verdicts_are_rejected_without_normalization(
 
     found = codes(valid_verdict_bundle)
     assert "invalid_verdict" in found
+    assert "verdict_mismatch" in found
+    mismatch = next(
+        problem
+        for problem in validate(valid_verdict_bundle)
+        if problem.code == "verdict_mismatch"
+    )
+    assert mismatch.message == (
+        "verdict status must be derived as READY_FOR_HUMAN_ACCEPTANCE"
+    )
     assert valid_verdict_bundle["verdict"]["status"] == status
+
+
+@pytest.mark.parametrize("value", [[], {}, True, None])
+def test_malformed_claim_status_is_stable_and_fail_closed(
+    valid_verdict_bundle, value
+):
+    valid_verdict_bundle["claims"][0]["status"] = value
+    valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+    original = deepcopy(valid_verdict_bundle)
+
+    first = validate(valid_verdict_bundle)
+    second = validate(valid_verdict_bundle)
+
+    assert first == second
+    assert "invalid_claim" in [problem.code for problem in first]
+    assert valid_verdict_bundle == original
+
+
+@pytest.mark.parametrize("value", [[], {}, True, None])
+def test_malformed_run_status_is_stable_and_fail_closed(
+    valid_verdict_bundle, value
+):
+    valid_verdict_bundle["run"]["status"] = value
+    valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+
+    first = validate(valid_verdict_bundle)
+    second = validate(valid_verdict_bundle)
+
+    assert first == second
+    assert "invalid_run" in [problem.code for problem in first]
+
+
+@pytest.mark.parametrize("value", [[], {}, True, None])
+def test_malformed_acceptance_decision_is_separate_from_ready_verdict(
+    valid_verdict_bundle, value
+):
+    acceptance = valid_acceptance(valid_verdict_bundle)
+    acceptance["decision"] = value
+    valid_verdict_bundle["human_acceptance"] = acceptance
+
+    first = validate(valid_verdict_bundle)
+    second = validate(valid_verdict_bundle)
+
+    assert first == second
+    assert [problem.code for problem in first] == ["invalid_human_acceptance"]
+
+
+@pytest.mark.parametrize("value", [[], {}, True, None])
+def test_malformed_claimed_verdict_does_not_change_independent_derivation(
+    valid_verdict_bundle, value
+):
+    valid_verdict_bundle["verdict"]["status"] = value
+
+    first = validate(valid_verdict_bundle)
+    second = validate(valid_verdict_bundle)
+
+    assert first == second
+    assert [problem.code for problem in first] == [
+        "invalid_verdict",
+        "verdict_mismatch",
+    ]
+    assert first[1].message == (
+        "verdict status must be derived as READY_FOR_HUMAN_ACCEPTANCE"
+    )
+
+
+@pytest.mark.parametrize("value", [[], {}, True, None])
+def test_malformed_verdict_object_does_not_change_independent_derivation(
+    valid_verdict_bundle, value
+):
+    valid_verdict_bundle["verdict"] = value
+
+    found = validate(valid_verdict_bundle)
+
+    assert [problem.code for problem in found] == [
+        "invalid_verdict",
+        "verdict_mismatch",
+    ]
+    assert found[1].message == (
+        "verdict status must be derived as READY_FOR_HUMAN_ACCEPTANCE"
+    )
 
 
 @pytest.mark.parametrize("kind", ["missing", "duplicate", "unexpected"])
@@ -236,6 +326,23 @@ def test_invalid_waiver_makes_disproven_evidence_inconclusive(valid_verdict_bund
     found = codes(valid_verdict_bundle)
     assert "invalid_waiver" in found
     assert "verdict_mismatch" not in found
+
+
+@pytest.mark.parametrize("field", ["author_kind", "policy_version"])
+@pytest.mark.parametrize("value", [[], {}, True, None])
+def test_malformed_waiver_status_like_fields_are_stable_and_fail_closed(
+    valid_verdict_bundle, field, value
+):
+    waiver = valid_waiver()
+    waiver[field] = value
+    valid_verdict_bundle["waivers"] = [waiver]
+    valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+
+    first = validate(valid_verdict_bundle)
+    second = validate(valid_verdict_bundle)
+
+    assert first == second
+    assert "invalid_waiver" in [problem.code for problem in first]
 
 
 @pytest.mark.parametrize(
