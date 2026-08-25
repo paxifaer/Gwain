@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
+import time
+from collections.abc import Mapping
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -357,20 +360,154 @@ def test_issue_output_is_capped_with_marker(tmp_path, expected_trace_context, mo
     assert [problem.code for problem in issues].count("issue_limit") == 1
 
 
-@pytest.mark.parametrize(
-    "raw",
-    ["[" * 1100 + "]" * 1100, '{"sequence":' + "9" * 5000 + "}"],
-)
-def test_pathological_json_is_a_safe_per_line_issue(
-    tmp_path, expected_trace_context, raw
+def test_pathological_nested_event_is_safely_rejected(
+    valid_trace_file, expected_trace_context
+):
+    lines = valid_trace_file.read_text(encoding="utf-8").splitlines()
+    event = json.loads(lines[0])
+    prefix = json.dumps({key: value for key, value in event.items() if key != "attributes"})
+    nested = "[" * 1100 + "0" + "]" * 1100
+    lines[0] = prefix[:-1] + f',"attributes":{{"nested":{nested}}}}}'
+    valid_trace_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    issues = validate_trace_file(valid_trace_file, expected_trace_context)
+    assert issues
+    assert any(
+        problem.code in {"invalid_json", "structure_limit", "schema_error"}
+        and problem.location == "line 1"
+        for problem in issues
+    )
+    assert "trace_file" not in [problem.code for problem in issues]
+
+
+def test_oversized_integer_is_a_safe_per_line_issue(
+    tmp_path, expected_trace_context
 ):
     path = tmp_path / "pathological.jsonl"
-    path.write_text(raw + "\n", encoding="utf-8")
+    path.write_text('{"sequence":' + "9" * 5000 + "}\n", encoding="utf-8")
     issues = validate_trace_file(path, expected_trace_context)
     assert issues
     assert issues[0].code in {"invalid_json", "structure_limit"}
     assert issues[0].location == "line 1"
     assert "trace_file" not in [problem.code for problem in issues]
+
+
+def test_fifo_and_symlink_are_rejected_promptly(
+    tmp_path, valid_trace_file, expected_trace_context
+):
+    fifo = tmp_path / "trace.fifo"
+    os.mkfifo(fifo)
+    symlink = tmp_path / "trace-link.jsonl"
+    symlink.symlink_to(valid_trace_file)
+    started = time.monotonic()
+    assert codes(fifo, expected_trace_context) == ["trace_file"]
+    assert time.monotonic() - started < 1
+    assert codes(symlink, expected_trace_context) == ["trace_file"]
+
+
+def test_path_replacement_with_fifo_is_rejected_without_blocking(
+    valid_trace_file, expected_trace_context, monkeypatch
+):
+    original_open = os.open
+    replacement = valid_trace_file.with_suffix(".saved")
+    swapped = False
+
+    def replace_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped:
+            valid_trace_file.rename(replacement)
+            os.mkfifo(valid_trace_file)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(trace_module.os, "open", replace_then_open)
+    started = time.monotonic()
+    assert codes(valid_trace_file, expected_trace_context) == ["trace_file"]
+    assert swapped
+    assert time.monotonic() - started < 1
+
+
+def test_nonregular_descriptor_is_closed(
+    valid_trace_file, expected_trace_context, monkeypatch
+):
+    original_open = os.open
+    original_close = os.close
+    opened = []
+    closed = []
+
+    def open_null(path, flags, mode=0o777, *, dir_fd=None):
+        descriptor = original_open("/dev/null", flags)
+        opened.append(descriptor)
+        return descriptor
+
+    def track_close(descriptor):
+        closed.append(descriptor)
+        return original_close(descriptor)
+
+    monkeypatch.setattr(trace_module.os, "open", open_null)
+    monkeypatch.setattr(trace_module.os, "close", track_close)
+    assert codes(valid_trace_file, expected_trace_context) == ["trace_file"]
+    assert opened == closed
+
+
+def test_missing_safe_open_capability_fails_closed(
+    valid_trace_file, expected_trace_context, monkeypatch
+):
+    monkeypatch.delattr(trace_module.os, "O_NOFOLLOW")
+    assert codes(valid_trace_file, expected_trace_context) == [
+        "trace_platform_unsupported"
+    ]
+
+
+def test_unsupported_safe_open_behavior_fails_closed(
+    valid_trace_file, expected_trace_context, monkeypatch
+):
+    def unsupported_open(path, flags):
+        raise NotImplementedError
+
+    monkeypatch.setattr(trace_module.os, "open", unsupported_open)
+    assert codes(valid_trace_file, expected_trace_context) == [
+        "trace_platform_unsupported"
+    ]
+
+
+class _ReadOnceContext(Mapping):
+    def __init__(self, values):
+        self.values = values
+        self.reads = {}
+
+    def __iter__(self):
+        return iter(self.values)
+
+    def __len__(self):
+        return len(self.values)
+
+    def __getitem__(self, key):
+        self.reads[key] = self.reads.get(key, 0) + 1
+        if self.reads[key] > 1:
+            raise RuntimeError("context changed")
+        return self.values[key]
+
+
+def test_expected_context_is_snapshotted_once(
+    valid_trace_file, expected_trace_context
+):
+    context = _ReadOnceContext(expected_trace_context)
+    assert validate_trace_file(valid_trace_file, context) == []
+    assert set(context.reads.values()) == {1}
+
+
+class _HostileContext(_ReadOnceContext):
+    def __getitem__(self, key):
+        raise RuntimeError("hostile mapping")
+
+
+def test_hostile_expected_context_is_rejected_without_throwing(
+    valid_trace_file, expected_trace_context
+):
+    issues = validate_trace_file(
+        valid_trace_file, _HostileContext(expected_trace_context)
+    )
+    assert [problem.code for problem in issues] == ["invalid_expected_context"]
 
 
 @pytest.mark.parametrize(

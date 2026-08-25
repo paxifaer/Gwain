@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping
+import errno
 import json
+import os
 from pathlib import Path
 import re
 import stat
@@ -78,22 +80,40 @@ def _reject_json_constant(_value: str) -> object:
     raise _InvalidJsonConstant
 
 
-def _valid_context(value: object) -> bool:
+def _snapshot_context(
+    value: object,
+) -> tuple[dict[str, str] | None, bool]:
+    if not isinstance(value, Mapping):
+        return None, False
     try:
-        if not isinstance(value, Mapping) or set(value) != set(CONTEXT_FIELDS):
-            return False
-        if any(not isinstance(value[name], str) or not value[name] for name in CONTEXT_FIELDS):
-            return False
-        return bool(
-            RUN_ID.fullmatch(value["run_id"])
-            and DIGEST.fullmatch(value["contract_id"])
-            and DIGEST.fullmatch(value["candidate_id"])
-            and TRACE_ID.fullmatch(value["operation_id"])
-            and TRACE_ID.fullmatch(value["trace_id"])
-            and value["operation_id"] == value["trace_id"]
-        )
+        if len(value) != len(CONTEXT_FIELDS):
+            return None, False
+        iterator = iter(value)
+        keys: list[object] = []
+        for _ in range(len(CONTEXT_FIELDS) + 1):
+            try:
+                keys.append(next(iterator))
+            except StopIteration:
+                break
+        if len(keys) != len(CONTEXT_FIELDS) or set(keys) != set(CONTEXT_FIELDS):
+            return None, False
+        snapshot = {field: value[field] for field in CONTEXT_FIELDS}
     except Exception:
-        return False
+        return None, True
+    if any(
+        not isinstance(snapshot[field], str) or not snapshot[field]
+        for field in CONTEXT_FIELDS
+    ):
+        return None, False
+    valid = bool(
+        RUN_ID.fullmatch(snapshot["run_id"])
+        and DIGEST.fullmatch(snapshot["contract_id"])
+        and DIGEST.fullmatch(snapshot["candidate_id"])
+        and TRACE_ID.fullmatch(snapshot["operation_id"])
+        and TRACE_ID.fullmatch(snapshot["trace_id"])
+        and snapshot["operation_id"] == snapshot["trace_id"]
+    )
+    return (snapshot, False) if valid else (None, False)
 
 
 def _line_issue(code: str, line_number: int, message: str) -> ValidationIssue:
@@ -120,16 +140,66 @@ def _read_events(
     spans: set[str] = set()
     nonblank_lines = 0
     total_bytes = 0
+    required_flags = ("O_RDONLY", "O_NONBLOCK", "O_NOFOLLOW", "O_CLOEXEC")
+    flag_values = [getattr(os, name, None) for name in required_flags]
+    if any(type(value) is not int for value in flag_values):
+        collector.add(issue(
+            "trace_platform_unsupported", "$",
+            "safe trace file opening is unsupported",
+        ))
+        return events, nonblank_lines
+    flags = 0
+    for value in flag_values:
+        flags |= value
+    descriptor: int | None = None
     try:
-        trace_path = Path(path)
-        metadata = trace_path.stat()
+        try:
+            descriptor = os.open(path, flags)
+            metadata = os.fstat(descriptor)
+        except (AttributeError, NotImplementedError):
+            collector.add(issue(
+                "trace_platform_unsupported", "$",
+                "safe trace file opening is unsupported",
+            ))
+            return events, nonblank_lines
+        except OSError as error:
+            unsupported_errors = {
+                errno.EINVAL,
+                errno.ENOSYS,
+                getattr(errno, "ENOTSUP", errno.ENOSYS),
+                getattr(errno, "EOPNOTSUPP", errno.ENOSYS),
+            }
+            code = (
+                "trace_platform_unsupported"
+                if error.errno in unsupported_errors
+                else "trace_file"
+            )
+            message = (
+                "safe trace file opening is unsupported"
+                if code == "trace_platform_unsupported"
+                else "trace file cannot be read"
+            )
+            collector.add(issue(code, "$", message))
+            return events, nonblank_lines
+        except (TypeError, ValueError):
+            collector.add(issue("trace_file", "$", "trace file cannot be read"))
+            return events, nonblank_lines
         if not stat.S_ISREG(metadata.st_mode):
             collector.add(issue("trace_file", "$", "trace evidence must be a regular file"))
             return events, nonblank_lines
         if metadata.st_size > MAX_TRACE_BYTES:
             collector.add(issue("trace_too_large", "$", "trace file exceeds the byte limit"))
             return events, nonblank_lines
-        with trace_path.open("rb") as stream:
+        try:
+            stream = os.fdopen(descriptor, "rb", closefd=True)
+        except (AttributeError, NotImplementedError):
+            collector.add(issue(
+                "trace_platform_unsupported", "$",
+                "safe trace file opening is unsupported",
+            ))
+            return events, nonblank_lines
+        descriptor = None
+        with stream:
             line_number = 0
             while True:
                 raw_line = stream.readline(MAX_LINE_BYTES + 1)
@@ -226,6 +296,12 @@ def _read_events(
     except (OSError, TypeError, ValueError):
         collector.add(issue("trace_file", "$", "trace file cannot be read"))
         return [], nonblank_lines
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
     return events, nonblank_lines
 
 
@@ -252,8 +328,10 @@ def _validate_cycles(parents: dict[str, object], collector: _IssueCollector) -> 
 
 def validate_trace_file(path: Path, expected_context: object) -> list[ValidationIssue]:
     collector = _IssueCollector()
-    if not _valid_context(expected_context):
-        collector.add(issue("expected_context", "$", "expected trace context is malformed"))
+    context, hostile_context = _snapshot_context(expected_context)
+    if context is None:
+        code = "invalid_expected_context" if hostile_context else "expected_context"
+        collector.add(issue(code, "$", "expected trace context is malformed"))
         return collector.result()
     events, nonblank_lines = _read_events(path, collector)
     if collector.truncated:
@@ -271,7 +349,7 @@ def validate_trace_file(path: Path, expected_context: object) -> list[Validation
     kinds: dict[str, list[tuple[str, int]]] = defaultdict(list)
     for line_number, event in events:
         for field in CONTEXT_FIELDS:
-            if event[field] != expected_context[field]:
+            if event[field] != context[field]:
                 if not collector.add(issue(
                     "trace_context_mismatch", f"line {line_number}.{field}",
                     f"{field} does not match expected context",
