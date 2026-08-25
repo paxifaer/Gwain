@@ -126,6 +126,50 @@ def test_permit_requires_human_issuer(
     )
 
 
+@pytest.mark.parametrize("schema_version", [None, 7, "WRONG"])
+def test_permit_requires_exact_schema_version(
+    valid_contract,
+    valid_candidate,
+    valid_permit,
+    valid_environment,
+    schema_version,
+):
+    if schema_version is None:
+        del valid_permit["schema_version"]
+    else:
+        valid_permit["schema_version"] = schema_version
+    refresh("permit", valid_permit)
+
+    matching = [
+        problem
+        for problem in validate(
+            valid_contract, valid_candidate, valid_permit, valid_environment
+        )
+        if problem.code == "invalid_permit_schema_version"
+    ]
+    assert [
+        (problem.location, problem.message) for problem in matching
+    ] == [
+        (
+            "permit.schema_version",
+            "permit schema_version must be gawain.execution-permit.v1",
+        )
+    ]
+
+
+def test_permit_schema_and_content_identity_are_independent(
+    valid_contract, valid_candidate, valid_permit, valid_environment
+):
+    valid_permit["schema_version"] = "WRONG"
+
+    assert {
+        "invalid_permit_schema_version",
+        "permit_id_mismatch",
+    }.issubset(
+        codes(valid_contract, valid_candidate, valid_permit, valid_environment)
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "value", "expected"),
     [

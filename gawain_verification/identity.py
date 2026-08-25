@@ -281,6 +281,15 @@ def validate_identity_gate(
         if identity_problem is not None:
             problems.append(identity_problem)
 
+        if permit.get("schema_version") != "gawain.execution-permit.v1":
+            problems.append(
+                issue(
+                    "invalid_permit_schema_version",
+                    "permit.schema_version",
+                    "permit schema_version must be gawain.execution-permit.v1",
+                )
+            )
+
         if permit.get("issuer_kind") != "human":
             problems.append(
                 issue(
