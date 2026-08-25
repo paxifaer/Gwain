@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import gawain_verification.artifacts as artifact_module
 from gawain_verification.artifacts import resolve_artifact, validate_artifacts
 from gawain_verification.schema import validate_schema
 
@@ -99,6 +100,35 @@ def test_internal_parent_directory_symlink_is_rejected(valid_artifact_bundle, tm
     (tmp_path / "artifacts").symlink_to(actual, target_is_directory=True)
 
     assert "artifact_symlink" in issue_codes(valid_artifact_bundle, tmp_path)
+
+
+def test_parent_swap_at_final_open_cannot_redirect_validation_to_replacement(
+    valid_artifact_bundle, tmp_path, monkeypatch
+):
+    artifact = tmp_path / "artifacts" / "evidence.json"
+    manifest_content = artifact.read_bytes()
+    artifact.write_bytes(b"x" * len(manifest_content))
+    moved_parent = tmp_path / "checked-artifacts"
+    original_open = os.open
+    swapped = False
+
+    def swap_parent_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        is_old_final_open = dir_fd is None and Path(path) == artifact
+        is_fd_relative_final_open = dir_fd is not None and path == "evidence.json"
+        if not swapped and (is_old_final_open or is_fd_relative_final_open):
+            artifact.parent.rename(moved_parent)
+            artifact.parent.mkdir()
+            artifact.write_bytes(manifest_content)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(artifact_module.os, "open", swap_parent_then_open)
+
+    issues = validate_artifacts(valid_artifact_bundle, tmp_path)
+
+    assert swapped
+    assert "artifact_digest_mismatch" in [problem.code for problem in issues]
 
 
 def test_directory_artifact_is_rejected(valid_artifact_bundle, tmp_path):

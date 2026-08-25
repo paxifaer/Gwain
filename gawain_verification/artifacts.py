@@ -6,7 +6,9 @@ import re
 import stat
 from collections import Counter
 from collections.abc import Mapping
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
+from typing import Iterator
 
 from .issues import ValidationIssue, issue
 
@@ -104,20 +106,74 @@ def _relocate(problem: ValidationIssue, location: str) -> ValidationIssue:
     return issue(problem.code, location, problem.message)
 
 
-def _hash_file(path: Path) -> tuple[int, str]:
+class _ArtifactNotRegularError(Exception):
+    pass
+
+
+@contextmanager
+def _bundle_root_descriptor(root: Path) -> Iterator[int | None]:
+    if not isinstance(root, Path):
+        yield None
+        return
+    try:
+        resolved_root = root.resolve(strict=True)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(resolved_root, flags)
+    except (OSError, RuntimeError):
+        yield None
+        return
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def _hash_file(root_descriptor: int, relative: PurePosixPath) -> tuple[int, str]:
     digest = hashlib.sha256()
     byte_count = 0
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
+    directory_descriptor = root_descriptor
+    owns_directory_descriptor = False
+    file_descriptor = -1
     try:
-        with os.fdopen(descriptor, "rb") as stream:
-            descriptor = -1
-            while chunk := stream.read(HASH_CHUNK_BYTES):
-                byte_count += len(chunk)
-                digest.update(chunk)
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        for part in relative.parts[:-1]:
+            next_descriptor = os.open(
+                part, directory_flags, dir_fd=directory_descriptor
+            )
+            if owns_directory_descriptor:
+                os.close(directory_descriptor)
+            directory_descriptor = next_descriptor
+            owns_directory_descriptor = True
+
+        file_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        file_descriptor = os.open(
+            relative.parts[-1], file_flags, dir_fd=directory_descriptor
+        )
+        if not stat.S_ISREG(os.fstat(file_descriptor).st_mode):
+            raise _ArtifactNotRegularError
+
+        while chunk := os.read(file_descriptor, HASH_CHUNK_BYTES):
+            byte_count += len(chunk)
+            digest.update(chunk)
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
+        if owns_directory_descriptor:
+            os.close(directory_descriptor)
     return byte_count, "sha256:" + digest.hexdigest()
 
 
@@ -202,6 +258,16 @@ def validate_artifacts(bundle: object, root: Path) -> list[ValidationIssue]:
             issue("invalid_artifacts", "artifacts", "artifacts must be a list")
         ]
 
+    with _bundle_root_descriptor(root) as root_descriptor:
+        return _validate_artifact_records(bundle, root, artifacts, root_descriptor)
+
+
+def _validate_artifact_records(
+    bundle: Mapping[object, object],
+    root: Path,
+    artifacts: list[object],
+    root_descriptor: int | None,
+) -> list[ValidationIssue]:
     problems: list[ValidationIssue] = []
     id_counts = Counter(
         record.get("artifact_id")
@@ -290,8 +356,30 @@ def validate_artifacts(bundle: object, root: Path) -> list[ValidationIssue]:
             continue
 
         known_ids.add(artifact_id)
+        if root_descriptor is None:
+            problems.append(
+                issue(
+                    "artifact_path_escape",
+                    f"{location}.path",
+                    "artifact root could not be opened safely",
+                )
+            )
+            known_ids.discard(artifact_id)
+            continue
         try:
-            actual_bytes, actual_digest = _hash_file(resolved)
+            actual_bytes, actual_digest = _hash_file(
+                root_descriptor, PurePosixPath(path_value)
+            )
+        except _ArtifactNotRegularError:
+            problems.append(
+                issue(
+                    "artifact_not_regular",
+                    f"{location}.path",
+                    "artifact must be a regular file",
+                )
+            )
+            known_ids.discard(artifact_id)
+            continue
         except OSError:
             problems.append(
                 issue(
