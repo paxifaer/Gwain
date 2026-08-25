@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from collections.abc import Mapping
 
 from .canonical import content_id
 from .issues import ValidationIssue, issue
@@ -21,20 +21,60 @@ COMPONENT_PATTERNS = {
 }
 
 
-def validate_candidate(candidate: dict[str, Any]) -> list[ValidationIssue]:
+def validate_candidate(candidate: object) -> list[ValidationIssue]:
     problems: list[ValidationIssue] = []
+    if not isinstance(candidate, Mapping):
+        return [
+            issue(
+                "invalid_candidate",
+                "candidate",
+                "candidate must be an object",
+            )
+        ]
+
     components = candidate.get("components")
-    if not isinstance(components, list) or not components:
-        problems.append(
+    if not isinstance(components, list):
+        return [
+            issue(
+                "invalid_components",
+                "candidate.components",
+                "candidate components must be a list",
+            )
+        ]
+    if not components:
+        return [
             issue(
                 "missing_components",
                 "candidate.components",
                 "candidate must contain at least one component",
             )
-        )
-        components = []
+        ]
 
-    seen_names: set[object] = set()
+    for index, component in enumerate(components):
+        if not isinstance(component, Mapping):
+            problems.append(
+                issue(
+                    "invalid_component",
+                    f"candidate.components[{index}]",
+                    "candidate component must be an object",
+                )
+            )
+            continue
+
+        name = component.get("name")
+        if not isinstance(name, str) or not name:
+            problems.append(
+                issue(
+                    "invalid_component_name",
+                    f"candidate.components[{index}].name",
+                    "component name must be a non-empty string",
+                )
+            )
+
+    if problems:
+        return problems
+
+    seen_names: set[str] = set()
     for index, component in enumerate(components):
         name = component.get("name")
         if name in seen_names:
