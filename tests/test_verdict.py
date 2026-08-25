@@ -25,11 +25,71 @@ def api(name):
 
 
 def validate(bundle, **kwargs):
-    return api("validate_verdict")(bundle, now=NOW, **kwargs)
+    gates = {
+        "identity_issues": [],
+        "artifact_issues": [],
+        "test_issues": [],
+        "trace_issues": [],
+    }
+    gates.update(kwargs)
+    return api("validate_verdict")(bundle, now=NOW, **gates)
 
 
 def codes(bundle, **kwargs):
     return [problem.code for problem in validate(bundle, **kwargs)]
+
+
+def test_all_gate_results_are_required_keyword_arguments(valid_verdict_bundle):
+    with pytest.raises(TypeError):
+        api("validate_verdict")(valid_verdict_bundle, now=NOW)
+
+
+class OneShotIssues:
+    def __init__(self):
+        self.next_calls = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.next_calls += 1
+        return issue("hidden", "gate", "must not be consumed")
+
+
+@pytest.mark.parametrize("gate_name", ["identity_issues", "artifact_issues", "test_issues", "trace_issues"])
+def test_one_shot_gate_results_are_rejected_without_consumption(
+    valid_verdict_bundle, gate_name
+):
+    source = OneShotIssues()
+    valid_verdict_bundle["verdict"]["status"] = (
+        "ENV_INVALID" if gate_name == "identity_issues" else "INCONCLUSIVE"
+    )
+
+    first = validate(valid_verdict_bundle, **{gate_name: source})
+    second = validate(valid_verdict_bundle, **{gate_name: source})
+
+    assert first == second
+    assert source.next_calls == 0
+    assert "gate_result_invalid" in [problem.code for problem in first]
+
+
+@pytest.mark.parametrize("source", [None, (item for item in ()), iter(())])
+def test_non_snapshot_gate_shapes_fail_closed(valid_verdict_bundle, source):
+    valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+    assert "gate_result_invalid" in codes(
+        valid_verdict_bundle, test_issues=source
+    )
+
+
+def test_invalid_test_cannot_be_hidden_by_empty_caller_issues(valid_verdict_bundle):
+    record = valid_verdict_bundle["tests"][0]
+    record["executed_test_count"] = 0
+    record["passed_test_count"] = 0
+    valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+
+    found = codes(valid_verdict_bundle, test_issues=[])
+    assert "test_gate_failed" in found
+    assert "verdict_mismatch" not in found
 
 
 @pytest.mark.parametrize(
@@ -290,19 +350,22 @@ def test_run_terminal_precedence(
     assert validate(valid_verdict_bundle, **kwargs) == []
 
 
-def valid_waiver():
+def valid_waiver(bundle):
     return {
         "author_kind": "human",
         "author": "operator@example.test",
         "reason": "Temporary documented exception",
-        "scope": ["restart-path-correlated", "P-01"],
+        "scope": ["claim:restart-path-correlated", "test:P-01"],
         "policy_version": "gawain.waiver-policy.v1",
         "expires_at": "2026-08-26T03:00:00Z",
+        "run_id": bundle["run_id"],
+        "contract_id": bundle["contract"]["contract_id"],
+        "candidate_id": bundle["candidate"]["candidate_id"],
     }
 
 
 def test_any_valid_waiver_prevents_ready(valid_verdict_bundle):
-    valid_verdict_bundle["waivers"] = [valid_waiver()]
+    valid_verdict_bundle["waivers"] = [valid_waiver(valid_verdict_bundle)]
     valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
 
     assert validate(valid_verdict_bundle) == []
@@ -310,7 +373,7 @@ def test_any_valid_waiver_prevents_ready(valid_verdict_bundle):
 
 def test_waiver_cannot_turn_failure_into_success(valid_verdict_bundle):
     valid_verdict_bundle["claims"][0]["status"] = "DISPROVEN"
-    valid_verdict_bundle["waivers"] = [valid_waiver()]
+    valid_verdict_bundle["waivers"] = [valid_waiver(valid_verdict_bundle)]
     valid_verdict_bundle["verdict"]["status"] = "FAIL"
 
     assert validate(valid_verdict_bundle) == []
@@ -318,7 +381,7 @@ def test_waiver_cannot_turn_failure_into_success(valid_verdict_bundle):
 
 def test_invalid_waiver_makes_disproven_evidence_inconclusive(valid_verdict_bundle):
     valid_verdict_bundle["claims"][0]["status"] = "DISPROVEN"
-    invalid = valid_waiver()
+    invalid = valid_waiver(valid_verdict_bundle)
     invalid["extra"] = True
     valid_verdict_bundle["waivers"] = [invalid]
     valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
@@ -333,7 +396,7 @@ def test_invalid_waiver_makes_disproven_evidence_inconclusive(valid_verdict_bund
 def test_malformed_waiver_status_like_fields_are_stable_and_fail_closed(
     valid_verdict_bundle, field, value
 ):
-    waiver = valid_waiver()
+    waiver = valid_waiver(valid_verdict_bundle)
     waiver[field] = value
     valid_verdict_bundle["waivers"] = [waiver]
     valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
@@ -343,6 +406,28 @@ def test_malformed_waiver_status_like_fields_are_stable_and_fail_closed(
 
     assert first == second
     assert "invalid_waiver" in [problem.code for problem in first]
+
+
+@pytest.mark.parametrize("field", ["run_id", "contract_id", "candidate_id"])
+def test_waiver_identity_binding_prevents_replay(valid_verdict_bundle, field):
+    waiver = valid_waiver(valid_verdict_bundle)
+    waiver[field] = "run-other" if field == "run_id" else "sha256:" + "0" * 64
+    valid_verdict_bundle["waivers"] = [waiver]
+    valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+
+    assert "invalid_waiver_binding" in codes(valid_verdict_bundle)
+
+
+@pytest.mark.parametrize("scope", [["P-01"], ["restart-path-correlated"]])
+def test_waiver_scope_requires_authoritative_namespace(
+    valid_verdict_bundle, scope
+):
+    waiver = valid_waiver(valid_verdict_bundle)
+    waiver["scope"] = scope
+    valid_verdict_bundle["waivers"] = [waiver]
+    valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+
+    assert "invalid_waiver_scope" in codes(valid_verdict_bundle)
 
 
 @pytest.mark.parametrize(
@@ -364,7 +449,7 @@ def test_malformed_waiver_status_like_fields_are_stable_and_fail_closed(
 def test_waiver_is_closed_human_scoped_and_unexpired(
     valid_verdict_bundle, mutation, expected
 ):
-    waiver = valid_waiver()
+    waiver = valid_waiver(valid_verdict_bundle)
     mutation(waiver)
     valid_verdict_bundle["waivers"] = [waiver]
     valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
@@ -379,6 +464,7 @@ def valid_acceptance(bundle):
         "reason": "Reviewed independent evidence",
         "decision": "ACCEPTED",
         "recorded_at": "2026-08-25T03:00:00+00:00",
+        "run_id": bundle["run_id"],
         "contract_id": bundle["contract"]["contract_id"],
         "candidate_id": bundle["candidate"]["candidate_id"],
     }
@@ -398,6 +484,50 @@ def test_valid_human_acceptance_does_not_change_verdict(valid_verdict_bundle):
     valid_verdict_bundle["human_acceptance"] = valid_acceptance(valid_verdict_bundle)
 
     assert validate(valid_verdict_bundle) == []
+
+
+def test_human_acceptance_is_bound_to_run(valid_verdict_bundle):
+    acceptance = valid_acceptance(valid_verdict_bundle)
+    acceptance["run_id"] = "run-other"
+    valid_verdict_bundle["human_acceptance"] = acceptance
+
+    found = codes(valid_verdict_bundle)
+    assert "invalid_human_acceptance" in found
+    assert "verdict_mismatch" not in found
+
+
+def test_future_human_acceptance_is_rejected_without_affecting_verdict(
+    valid_verdict_bundle
+):
+    acceptance = valid_acceptance(valid_verdict_bundle)
+    acceptance["recorded_at"] = "2026-08-25T03:00:00.000001Z"
+    valid_verdict_bundle["human_acceptance"] = acceptance
+
+    assert codes(valid_verdict_bundle) == ["invalid_human_acceptance"]
+
+
+@pytest.mark.parametrize(
+    ("fraction", "valid"),
+    [(".1", True), (".123456", True), (".1234567", False)],
+)
+def test_utc_fraction_is_limited_to_six_digits(
+    valid_verdict_bundle, fraction, valid
+):
+    waiver = valid_waiver(valid_verdict_bundle)
+    waiver["expires_at"] = f"2026-08-26T03:00:00{fraction}Z"
+    acceptance = valid_acceptance(valid_verdict_bundle)
+    acceptance["recorded_at"] = f"2026-08-25T02:59:59{fraction}Z"
+    valid_verdict_bundle["waivers"] = [waiver]
+    valid_verdict_bundle["human_acceptance"] = acceptance
+    valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+
+    found = validate(valid_verdict_bundle)
+    if valid:
+        assert found == []
+    else:
+        assert {"invalid_waiver_time", "invalid_human_acceptance"}.issubset(
+            {problem.code for problem in found}
+        )
 
 
 @pytest.mark.parametrize(
@@ -449,6 +579,47 @@ def test_boolean_external_shapes_fail_closed(valid_verdict_bundle, field, value)
     assert validate(valid_verdict_bundle)
 
 
+class HostileString(str):
+    def strip(self, *args, **kwargs):
+        raise AssertionError("hostile string method invoked")
+
+    def __hash__(self):
+        raise AssertionError("hostile string hash invoked")
+
+    def __eq__(self, other):
+        raise AssertionError("hostile string equality invoked")
+
+
+class HostileList(list):
+    def __iter__(self):
+        raise AssertionError("hostile list iterator invoked")
+
+
+class HostileDict(dict):
+    def get(self, *args, **kwargs):
+        raise AssertionError("hostile dict get invoked")
+
+
+def test_hostile_builtin_subclasses_fail_closed_without_methods(
+    valid_verdict_bundle
+):
+    bundles = []
+    hostile_id = deepcopy(valid_verdict_bundle)
+    hostile_id["claims"][0]["id"] = HostileString("claim")
+    hostile_id["verdict"]["status"] = "INCONCLUSIVE"
+    bundles.append(hostile_id)
+    hostile_claims = deepcopy(valid_verdict_bundle)
+    hostile_claims["claims"] = HostileList(hostile_claims["claims"])
+    hostile_claims["verdict"]["status"] = "INCONCLUSIVE"
+    bundles.append(hostile_claims)
+    hostile_verdict = deepcopy(valid_verdict_bundle)
+    hostile_verdict["verdict"] = HostileDict(hostile_verdict["verdict"])
+    bundles.append(hostile_verdict)
+
+    for bundle in bundles:
+        assert validate(bundle)
+
+
 class HostileIterable:
     def __iter__(self):
         yield issue("first", "x", "bad")
@@ -463,7 +634,7 @@ def test_hostile_and_malformed_issue_iterables_fail_closed_deterministically(
     second = validate(valid_verdict_bundle, test_issues=HostileIterable())
 
     assert first == second
-    assert "invalid_test_issues" in [problem.code for problem in first]
+    assert "gate_result_invalid" in [problem.code for problem in first]
     assert validate(valid_verdict_bundle, test_issues=[True])
 
 
@@ -471,7 +642,7 @@ def test_malformed_validation_issue_record_is_rejected(valid_verdict_bundle):
     valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
     malformed = ValidationIssue(code=True, location=[], message={})
 
-    assert "invalid_test_issues" in codes(
+    assert "gate_result_invalid" in codes(
         valid_verdict_bundle, test_issues=[malformed]
     )
 
@@ -479,10 +650,79 @@ def test_malformed_validation_issue_record_is_rejected(valid_verdict_bundle):
 def test_unbounded_issue_iterable_is_bounded_and_rejected(valid_verdict_bundle):
     valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
 
-    assert "invalid_test_issues" in codes(
+    assert "gate_result_invalid" in codes(
         valid_verdict_bundle,
         test_issues=repeat(issue("test", "test", "failed")),
     )
+
+
+def test_gate_snapshot_limit_fails_closed(valid_verdict_bundle, monkeypatch):
+    monkeypatch.setattr(verdict_module, "MAX_GATE_ISSUES", 1)
+    valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+    gate = [issue("one", "gate", "bad"), issue("two", "gate", "bad")]
+
+    assert "gate_result_invalid" in codes(valid_verdict_bundle, test_issues=gate)
+
+
+@pytest.mark.parametrize(
+    ("constant", "mutation"),
+    [
+        ("MAX_REQUIRED_CLAIMS", lambda bundle: None),
+        ("MAX_REQUIRED_TESTS", lambda bundle: None),
+        ("MAX_RECORDS", lambda bundle: None),
+        (
+            "MAX_WAIVERS",
+            lambda bundle: bundle.update(
+                waivers=[valid_waiver(bundle), valid_waiver(bundle)]
+            ),
+        ),
+        (
+            "MAX_SCOPE_IDS",
+            lambda bundle: bundle.update(waivers=[valid_waiver(bundle)]),
+        ),
+    ],
+)
+def test_resource_limits_fail_closed(
+    valid_verdict_bundle, monkeypatch, constant, mutation
+):
+    monkeypatch.setattr(verdict_module, constant, 1)
+    mutation(valid_verdict_bundle)
+    valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+
+    assert "resource_limit_exceeded" in codes(valid_verdict_bundle)
+
+
+def test_claim_evidence_limit_fails_closed(valid_verdict_bundle, monkeypatch):
+    monkeypatch.setattr(verdict_module, "MAX_EVIDENCE_IDS", 0)
+    valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+
+    assert "resource_limit_exceeded" in codes(valid_verdict_bundle)
+
+
+def test_issue_output_is_capped_with_marker(valid_verdict_bundle, monkeypatch):
+    monkeypatch.setattr(verdict_module, "MAX_ISSUES", 3)
+    valid_verdict_bundle["claims"] = []
+    valid_verdict_bundle["tests"] = []
+    valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+
+    found = validate(valid_verdict_bundle)
+
+    assert len(found) == 3
+    assert "issue_limit_reached" in [problem.code for problem in found]
+
+
+def test_long_untrusted_id_is_not_echoed_in_diagnostics(
+    valid_verdict_bundle, monkeypatch
+):
+    monkeypatch.setattr(verdict_module, "MAX_STRING_LENGTH", 8)
+    raw_id = "candidate-controlled-" + "x" * 100
+    valid_verdict_bundle["claims"][0]["id"] = raw_id
+    valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
+
+    found = validate(valid_verdict_bundle)
+
+    assert found
+    assert raw_id not in repr(found)
 
 
 def test_validation_is_nonmutating_and_deterministic(valid_verdict_bundle):
@@ -533,7 +773,7 @@ def test_evidence_schema_closes_run_claim_and_verdict_records(
 
 
 def test_evidence_schema_closes_waiver_and_human_acceptance(valid_verdict_bundle):
-    valid_verdict_bundle["waivers"] = [valid_waiver()]
+    valid_verdict_bundle["waivers"] = [valid_waiver(valid_verdict_bundle)]
     valid_verdict_bundle["human_acceptance"] = valid_acceptance(valid_verdict_bundle)
     assert validate_schema(valid_verdict_bundle, "evidence-bundle.v1.schema.json") == []
 

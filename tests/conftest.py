@@ -322,7 +322,12 @@ def valid_test_bundle() -> dict[str, object]:
 
 @pytest.fixture
 def valid_verdict_bundle(valid_contract, valid_candidate, valid_permit):
-    artifact_id = "artifact-verdict-evidence"
+    artifact_kinds = {
+        "device-state": "artifact-device-state",
+        "application-trace": "artifact-application-trace",
+        "deployment-record": "artifact-deployment-record",
+        "installed-digest": "artifact-installed-digest",
+    }
     tests = []
     for requirement in valid_contract["required_test_cases"]:
         expected_outcome = requirement["expected_outcome"]
@@ -347,7 +352,14 @@ def valid_verdict_bundle(valid_contract, valid_candidate, valid_permit):
                     "observed": requirement["oracle"]["expected"],
                     "passed": True,
                 },
-                "evidence": [artifact_id],
+                "evidence": [
+                    artifact_kinds[kind]
+                    for kind in (
+                        ("deployment-record", "installed-digest")
+                        if requirement["required_level"] == "deployment"
+                        else ("device-state", "application-trace")
+                    )
+                ],
             }
         )
     return {
@@ -361,15 +373,20 @@ def valid_verdict_bundle(valid_contract, valid_candidate, valid_permit):
         "artifacts": [
             {
                 "artifact_id": artifact_id,
-                "kind": "test-evidence",
-                "path": "artifacts/verdict.json",
+                "kind": kind,
+                "path": f"artifacts/{kind}.json",
                 "bytes": 1,
                 "sha256": "sha256:" + "9" * 64,
             }
+            for kind, artifact_id in artifact_kinds.items()
         ],
         "tests": tests,
         "claims": [
-            {"id": claim_id, "status": "PROVEN", "evidence": [artifact_id]}
+            {
+                "id": claim_id,
+                "status": "PROVEN",
+                "evidence": [artifact_kinds["application-trace"]],
+            }
             for claim_id in valid_contract["required_claims"]
         ],
         "traces": [],
