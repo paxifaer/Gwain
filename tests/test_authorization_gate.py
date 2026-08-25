@@ -1,6 +1,9 @@
 from datetime import UTC, datetime
+from importlib import resources
+import json
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from gawain_verification.canonical import content_id
 from gawain_verification.identity import validate_identity_gate
@@ -251,7 +254,10 @@ def test_permit_authorization_fields_are_arrays_of_non_empty_strings(
 @pytest.mark.parametrize(
     ("mutation", "expected"),
     [
-        (lambda environment: environment.update(host_identity=""), "missing_host_identity"),
+        (
+            lambda environment: environment.update(host_identity=""),
+            "invalid_environment_host_identity",
+        ),
         (
             lambda environment: environment.update(gateway_endpoint="192.168.110.65:1"),
             "gateway_endpoint_mismatch",
@@ -279,7 +285,68 @@ def test_peer_address_alone_is_not_host_identity(
     del valid_environment["host_identity"]
     valid_environment["peer_addr"] = "192.168.110.65"
 
-    assert "missing_host_identity" in codes(
+    assert "invalid_environment_host_identity" in codes(
+        valid_contract, valid_candidate, valid_permit, valid_environment
+    )
+
+
+@pytest.mark.parametrize(
+    "host_identity",
+    ["", " ", "192.168.110.65", "host-key", "sha256:" + "A" * 64],
+)
+def test_contract_requires_anchored_host_identity(
+    valid_contract,
+    valid_candidate,
+    valid_permit,
+    valid_environment,
+    host_identity,
+):
+    valid_contract["host_identity"] = host_identity
+    refresh("contract", valid_contract)
+
+    assert "invalid_contract_host_identity" in codes(
+        valid_contract, valid_candidate, valid_permit, valid_environment
+    )
+
+
+def test_contract_requires_host_identity_field(
+    valid_contract, valid_candidate, valid_permit, valid_environment
+):
+    del valid_contract["host_identity"]
+    refresh("contract", valid_contract)
+
+    assert "invalid_contract_host_identity" in codes(
+        valid_contract, valid_candidate, valid_permit, valid_environment
+    )
+
+
+@pytest.mark.parametrize(
+    "host_identity",
+    [None, "", " ", "192.168.110.65", "host-key", "sha256:" + "A" * 64],
+)
+def test_environment_requires_anchored_host_identity(
+    valid_contract,
+    valid_candidate,
+    valid_permit,
+    valid_environment,
+    host_identity,
+):
+    if host_identity is None:
+        del valid_environment["host_identity"]
+    else:
+        valid_environment["host_identity"] = host_identity
+
+    assert "invalid_environment_host_identity" in codes(
+        valid_contract, valid_candidate, valid_permit, valid_environment
+    )
+
+
+def test_environment_host_identity_must_match_contract(
+    valid_contract, valid_candidate, valid_permit, valid_environment
+):
+    valid_environment["host_identity"] = "sha256:" + "8" * 64
+
+    assert "host_identity_mismatch" in codes(
         valid_contract, valid_candidate, valid_permit, valid_environment
     )
 
@@ -396,6 +463,61 @@ def test_contract_schema_requires_all_frozen_fields(valid_contract, cloned):
     assert issues and issues[0].location == "$"
 
 
+def test_contract_schema_requires_host_identity(valid_contract):
+    del valid_contract["host_identity"]
+    refresh("contract", valid_contract)
+
+    assert validate_schema(
+        valid_contract, "verification-contract.v1.schema.json"
+    )
+
+
+def test_contract_schema_requires_sha256_host_identity(valid_contract):
+    valid_contract["host_identity"] = "192.168.110.65"
+    refresh("contract", valid_contract)
+
+    assert "$.host_identity" in {
+        problem.location
+        for problem in validate_schema(
+            valid_contract, "verification-contract.v1.schema.json"
+        )
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("connection_hint", "999.1.1.1"),
+        ("gateway_endpoint", "192.168.110.65:0"),
+        ("gateway_endpoint", "192.168.110.65:65536"),
+        ("gateway_endpoint", "192.168.110.65"),
+        ("gateway_endpoint", "999.168.110.65:50053"),
+    ],
+)
+def test_contract_schema_rejects_invalid_network_endpoints(
+    valid_contract, field, value
+):
+    valid_contract[field] = value
+    refresh("contract", valid_contract)
+
+    assert f"$.{field}" in {
+        problem.location
+        for problem in validate_schema(
+            valid_contract, "verification-contract.v1.schema.json"
+        )
+    }
+
+
+@pytest.mark.parametrize("port", [1, 65535])
+def test_contract_schema_accepts_endpoint_port_boundaries(valid_contract, port):
+    valid_contract["gateway_endpoint"] = f"192.168.110.65:{port}"
+    refresh("contract", valid_contract)
+
+    assert validate_schema(
+        valid_contract, "verification-contract.v1.schema.json"
+    ) == []
+
+
 def test_schema_issues_are_sorted_by_json_path(valid_contract, cloned):
     contract = cloned(valid_contract)
     contract["unit"] = ""
@@ -426,3 +548,85 @@ def test_evidence_bundle_schema_is_closed_at_top_level(valid_contract):
         problem.code
         for problem in validate_schema(bundle, "evidence-bundle.v1.schema.json")
     ] == ["schema_error"]
+
+
+@pytest.mark.parametrize(
+    "schema_name",
+    [
+        "unknown.schema.json",
+        "/definitely-not-a-gawain-schema.json",
+        "../definitely-not-a-gawain-schema.json",
+    ],
+)
+def test_schema_name_is_closed_and_cannot_traverse(schema_name):
+    assert [
+        (problem.code, problem.location, problem.message)
+        for problem in validate_schema({}, schema_name)
+    ] == [
+        (
+            "unknown_schema",
+            "schema_name",
+            f"unsupported schema name: {schema_name}",
+        )
+    ]
+
+
+def test_static_schemas_are_valid_draft_2020_12_schemas():
+    schema_package = resources.files("gawain_verification.schemas")
+    for schema_name in (
+        "verification-contract.v1.schema.json",
+        "evidence-bundle.v1.schema.json",
+    ):
+        schema = json.loads(
+            schema_package.joinpath(schema_name).read_text(encoding="utf-8")
+        )
+        Draft202012Validator.check_schema(schema)
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "2026-08-25 00:00:00Z",
+        "20260825T000000Z",
+        "2026-W35-2T00:00:00Z",
+        "2026-08-25T00:00:00",
+        "2026-08-25T00:00:00+01:00",
+        "2026-08-25T00:00:00+00:00:00",
+    ],
+)
+def test_permit_rejects_non_utc_grammar(
+    valid_contract,
+    valid_candidate,
+    valid_permit,
+    valid_environment,
+    timestamp,
+):
+    valid_permit["not_before"] = timestamp
+    refresh("permit", valid_permit)
+
+    assert "permit_invalid_time" in codes(
+        valid_contract, valid_candidate, valid_permit, valid_environment
+    )
+
+
+@pytest.mark.parametrize("suffix", ["Z", "+00:00"])
+def test_permit_accepts_inclusive_utc_boundary_with_allowed_suffix(
+    valid_contract,
+    valid_candidate,
+    valid_permit,
+    valid_environment,
+    suffix,
+):
+    boundary = f"2026-08-25T03:00:00{suffix}"
+    valid_permit["not_before"] = boundary
+    valid_permit["not_after"] = boundary
+    refresh("permit", valid_permit)
+
+    assert not {
+        "permit_invalid_time",
+        "permit_invalid_window",
+        "permit_not_yet_valid",
+        "permit_expired",
+    }.intersection(
+        codes(valid_contract, valid_candidate, valid_permit, valid_environment)
+    )

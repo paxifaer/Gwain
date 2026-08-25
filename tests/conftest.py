@@ -14,6 +14,7 @@ def valid_contract() -> dict[str, object]:
         "device_id": "SP000065",
         "connection_hint": "192.168.110.65",
         "gateway_endpoint": "192.168.110.65:50053",
+        "host_identity": "sha256:" + "7" * 64,
         "service_id": "gawain-canary",
         "unit": "gawain-canary.service",
         "systemd_scope": "user",
@@ -77,7 +78,7 @@ def valid_permit() -> dict[str, object]:
 def valid_environment(valid_candidate) -> dict[str, object]:
     return {
         "device_id": "SP000065",
-        "host_identity": "ssh-ed25519 SHA256:independently-verified-host-key",
+        "host_identity": "sha256:" + "7" * 64,
         "gateway_endpoint": "192.168.110.65:50053",
         "installed_components": [
             {

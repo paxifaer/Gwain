@@ -15,10 +15,10 @@ test = ["pytest>=8,<10"]
 gawain-verify = "gawain_verification.cli:main"
 
 [tool.setuptools]
-packages = ["gawain_verification", "schemas"]
+packages = ["gawain_verification", "gawain_verification.schemas"]
 
 [tool.setuptools.package-data]
-schemas = ["*.json"]
+"gawain_verification.schemas" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

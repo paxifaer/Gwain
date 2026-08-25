@@ -12,6 +12,10 @@ from .issues import ValidationIssue, issue
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+UTC_TIME_PATTERN = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]+)?(?:Z|\+00:00)$"
+)
 
 COMPONENT_PATTERNS = {
     "base_commit": COMMIT_PATTERN,
@@ -134,10 +138,11 @@ def _content_identity_issue(
 
 
 def _utc_time(value: object) -> datetime | None:
-    if not isinstance(value, str):
+    if not isinstance(value, str) or UTC_TIME_PATTERN.fullmatch(value) is None:
         return None
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        parsed = datetime.fromisoformat(normalized)
     except ValueError:
         return None
     if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
@@ -262,6 +267,18 @@ def validate_identity_gate(
         identity_problem = _content_identity_issue("contract", contract)
         if identity_problem is not None:
             problems.append(identity_problem)
+        contract_host_identity = contract.get("host_identity")
+        if (
+            not isinstance(contract_host_identity, str)
+            or SHA256_PATTERN.fullmatch(contract_host_identity) is None
+        ):
+            problems.append(
+                issue(
+                    "invalid_contract_host_identity",
+                    "contract.host_identity",
+                    "contract host_identity must be a sha256 fingerprint",
+                )
+            )
 
     try:
         problems.extend(validate_candidate(candidate))
@@ -399,12 +416,26 @@ def validate_identity_gate(
                     )
                 )
         host_identity = environment.get("host_identity")
-        if not isinstance(host_identity, str) or not host_identity:
+        if (
+            not isinstance(host_identity, str)
+            or SHA256_PATTERN.fullmatch(host_identity) is None
+        ):
             problems.append(
                 issue(
-                    "missing_host_identity",
+                    "invalid_environment_host_identity",
                     "environment.host_identity",
-                    "an independently verifiable host identity is required",
+                    "environment host_identity must be a sha256 fingerprint",
+                )
+            )
+        elif (
+            isinstance(contract, Mapping)
+            and host_identity != contract.get("host_identity")
+        ):
+            problems.append(
+                issue(
+                    "host_identity_mismatch",
+                    "environment.host_identity",
+                    "environment host_identity does not match contract",
                 )
             )
         if isinstance(candidate, Mapping):
