@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping
+import math
+import re
 
 from .issues import ValidationIssue, issue
 
@@ -46,6 +48,12 @@ TEST_FIELDS = frozenset(
         "evidence",
     }
 )
+REQUIREMENT_FIELDS = frozenset(
+    {"id", "required_level", "expected_outcome", "expected_test_count", "oracle"}
+)
+REQUIREMENT_ORACLE_FIELDS = frozenset({"assertion", "expected"})
+RECORD_ORACLE_FIELDS = frozenset({"assertion", "expected", "observed", "passed"})
+ENVIRONMENT_FINGERPRINT_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _artifact_kinds(
@@ -77,34 +85,91 @@ def _artifact_kinds(
     }
 
 
+def _is_json_value(value: object) -> bool:
+    if value is None or isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_json_value(item) for item in value)
+    if isinstance(value, Mapping):
+        return all(
+            isinstance(key, str) and _is_json_value(item)
+            for key, item in value.items()
+        )
+    return False
+
+
+def _exact_json_equal(left: object, right: object) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _exact_json_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    if isinstance(left, Mapping):
+        return set(left) == set(right) and all(
+            _exact_json_equal(left[key], right[key]) for key in left
+        )
+    return left == right
+
+
+def _valid_requirement(requirement: Mapping[object, object]) -> bool:
+    oracle = requirement.get("oracle")
+    return (
+        set(requirement) == REQUIREMENT_FIELDS
+        and isinstance(requirement.get("id"), str)
+        and bool(requirement.get("id"))
+        and isinstance(requirement.get("required_level"), str)
+        and requirement.get("required_level") in TEST_LEVELS
+        and isinstance(requirement.get("expected_outcome"), str)
+        and requirement.get("expected_outcome") in {"PASS", "REJECT"}
+        and isinstance(requirement.get("expected_test_count"), int)
+        and not isinstance(requirement.get("expected_test_count"), bool)
+        and requirement.get("expected_test_count") >= 1
+        and isinstance(oracle, Mapping)
+        and set(oracle) == REQUIREMENT_ORACLE_FIELDS
+        and isinstance(oracle.get("assertion"), str)
+        and bool(oracle.get("assertion").strip())
+        and oracle.get("expected") is not None
+        and _is_json_value(oracle.get("expected"))
+    )
+
+
 def _required_test_cases(
     bundle: Mapping[object, object], problems: list[ValidationIssue]
-) -> list[str] | None:
+) -> tuple[list[str] | None, dict[str, Mapping[object, object]]]:
     contract = bundle.get("contract")
     if not isinstance(contract, Mapping):
         problems.append(
             issue("invalid_contract", "contract", "contract must be an object")
         )
-        return None
+        return None, {}
 
     required = contract.get("required_test_cases")
     if (
         not isinstance(required, list)
         or not required
-        or not all(isinstance(case_id, str) and bool(case_id) for case_id in required)
     ):
         problems.append(
             issue(
                 "invalid_required_test_cases",
                 "contract.required_test_cases",
-                "required_test_cases must be a non-empty list of non-empty strings",
+                "required_test_cases must be a non-empty list",
             )
         )
-        return None
+        return None, {}
 
-    duplicates = sorted(
-        case_id for case_id, count in Counter(required).items() if count > 1
-    )
+    candidate_ids = [
+        requirement.get("id")
+        for requirement in required
+        if isinstance(requirement, Mapping)
+        and isinstance(requirement.get("id"), str)
+        and bool(requirement.get("id"))
+    ]
+    id_counts = Counter(candidate_ids)
+    duplicates = sorted(case_id for case_id, count in id_counts.items() if count > 1)
     for case_id in duplicates:
         problems.append(
             issue(
@@ -113,15 +178,30 @@ def _required_test_cases(
                 f"required test case {case_id!r} is duplicated",
             )
         )
-    if duplicates:
-        return None
-    return required
+    authorities: dict[str, Mapping[object, object]] = {}
+    for index, requirement in enumerate(required):
+        location = f"contract.required_test_cases[{index}]"
+        if not isinstance(requirement, Mapping) or not _valid_requirement(requirement):
+            problems.append(
+                issue(
+                    "invalid_test_requirement",
+                    location,
+                    "test requirement must have the closed authoritative shape",
+                )
+            )
+            continue
+        case_id = requirement["id"]
+        if id_counts[case_id] == 1:
+            authorities[case_id] = requirement
+
+    return list(authorities), authorities
 
 
 def _validate_record(
     record: Mapping[object, object],
     location: str,
     artifact_kinds: Mapping[str, str],
+    requirement: Mapping[object, object] | None,
 ) -> list[ValidationIssue]:
     problems: list[ValidationIssue] = []
 
@@ -137,7 +217,7 @@ def _validate_record(
             )
         )
 
-    for field in ("id", "command", "cwd", "environment_fingerprint"):
+    for field in ("id", "command", "cwd"):
         value = record.get(field)
         if not isinstance(value, str) or not value:
             problems.append(
@@ -147,6 +227,19 @@ def _validate_record(
                     f"{field} must be a non-empty string",
                 )
             )
+
+    environment_fingerprint = record.get("environment_fingerprint")
+    if (
+        not isinstance(environment_fingerprint, str)
+        or ENVIRONMENT_FINGERPRINT_PATTERN.fullmatch(environment_fingerprint) is None
+    ):
+        problems.append(
+            issue(
+                "invalid_environment_fingerprint",
+                f"{location}.environment_fingerprint",
+                "environment_fingerprint must be a lowercase sha256 digest",
+            )
+        )
 
     required_level = record.get("required_level")
     observed_level = record.get("observed_level")
@@ -178,6 +271,16 @@ def _validate_record(
                 "test_level_mismatch",
                 f"{location}.observed_level",
                 "observed test level must exactly match the required level",
+            )
+        )
+    if requirement is not None and not _exact_json_equal(
+        required_level, requirement["required_level"]
+    ):
+        problems.append(
+            issue(
+                "required_level_contract_mismatch",
+                f"{location}.required_level",
+                "required_level must match the contract requirement",
             )
         )
 
@@ -223,6 +326,16 @@ def _validate_record(
                     "positive test must report PASS",
                 )
             )
+    if requirement is not None and not _exact_json_equal(
+        expected_outcome, requirement["expected_outcome"]
+    ):
+        problems.append(
+            issue(
+                "expected_outcome_contract_mismatch",
+                f"{location}.expected_outcome",
+                "expected_outcome must match the contract requirement",
+            )
+        )
 
     valid_counts: dict[str, int] = {}
     for field in COUNT_FIELDS:
@@ -254,8 +367,11 @@ def _validate_record(
                 "at least one test must execute",
             )
         )
-    if {"expected_test_count", "executed_test_count"}.issubset(valid_counts) and (
-        valid_counts["executed_test_count"] != valid_counts["expected_test_count"]
+    if (
+        valid_counts.get("expected_test_count", 0) > 0
+        and valid_counts.get("executed_test_count", 0) > 0
+        and valid_counts["executed_test_count"]
+        != valid_counts["expected_test_count"]
     ):
         problems.append(
             issue(
@@ -264,8 +380,11 @@ def _validate_record(
                 "executed_test_count must equal expected_test_count",
             )
         )
-    if set(COUNT_FIELDS).issubset(valid_counts) and (
-        valid_counts["passed_test_count"]
+    if (
+        set(COUNT_FIELDS).issubset(valid_counts)
+        and valid_counts["expected_test_count"] > 0
+        and valid_counts["executed_test_count"] > 0
+        and valid_counts["passed_test_count"]
         + valid_counts["failed_test_count"]
         + valid_counts["ignored_test_count"]
         != valid_counts["executed_test_count"]
@@ -275,6 +394,17 @@ def _validate_record(
                 "test_count_sum_mismatch",
                 location,
                 "passed, failed, and ignored counts must sum to executed count",
+            )
+        )
+
+    if requirement is not None and not _exact_json_equal(
+        record.get("expected_test_count"), requirement["expected_test_count"]
+    ):
+        problems.append(
+            issue(
+                "expected_test_count_contract_mismatch",
+                f"{location}.expected_test_count",
+                "expected_test_count must match the contract requirement",
             )
         )
     if valid_counts.get("failed_test_count", 0) > 0:
@@ -313,14 +443,47 @@ def _validate_record(
         )
 
     oracle = record.get("oracle")
-    if not isinstance(oracle, Mapping) or not oracle:
+    oracle_valid = (
+        isinstance(oracle, Mapping)
+        and set(oracle) == RECORD_ORACLE_FIELDS
+        and isinstance(oracle.get("assertion"), str)
+        and bool(oracle.get("assertion").strip())
+        and oracle.get("expected") is not None
+        and _is_json_value(oracle.get("expected"))
+        and oracle.get("observed") is not None
+        and _is_json_value(oracle.get("observed"))
+        and oracle.get("passed") is True
+    )
+    if not oracle_valid:
         problems.append(
             issue(
                 "invalid_oracle",
                 f"{location}.oracle",
-                "oracle must be a non-empty object",
+                "oracle must have an assertion, expected and observed values, and passed true",
             )
         )
+    if requirement is not None and isinstance(oracle, Mapping):
+        requirement_oracle = requirement["oracle"]
+        if not _exact_json_equal(
+            oracle.get("assertion"), requirement_oracle["assertion"]
+        ):
+            problems.append(
+                issue(
+                    "oracle_assertion_contract_mismatch",
+                    f"{location}.oracle.assertion",
+                    "oracle assertion must match the contract requirement",
+                )
+            )
+        if not _exact_json_equal(
+            oracle.get("expected"), requirement_oracle["expected"]
+        ):
+            problems.append(
+                issue(
+                    "oracle_expected_contract_mismatch",
+                    f"{location}.oracle.expected",
+                    "oracle expected value must match the contract requirement",
+                )
+            )
 
     evidence = record.get("evidence")
     evidence_valid = (
@@ -377,7 +540,7 @@ def validate_tests(bundle: object) -> list[ValidationIssue]:
         return [issue("invalid_bundle", "bundle", "bundle must be an object")]
 
     problems: list[ValidationIssue] = []
-    required = _required_test_cases(bundle, problems)
+    required, requirements = _required_test_cases(bundle, problems)
     artifact_kinds = _artifact_kinds(bundle, problems)
 
     records = bundle.get("tests")
@@ -400,7 +563,10 @@ def validate_tests(bundle: object) -> list[ValidationIssue]:
         test_id = record.get("id")
         if isinstance(test_id, str) and test_id:
             record_ids.append(test_id)
-        problems.extend(_validate_record(record, location, artifact_kinds))
+        requirement = requirements.get(test_id) if isinstance(test_id, str) else None
+        problems.extend(
+            _validate_record(record, location, artifact_kinds, requirement)
+        )
 
     id_counts = Counter(record_ids)
     duplicate_ids = sorted(

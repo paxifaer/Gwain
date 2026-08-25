@@ -21,7 +21,46 @@ def valid_contract() -> dict[str, object]:
         "systemd_scope": "user",
         "action": "Restart",
         "success_terminal": "READY_FOR_HUMAN_ACCEPTANCE",
-        "required_test_cases": ["P-01", "N-01", "N-02", "N-03", "N-04", "N-05"],
+        "required_test_cases": [
+            {
+                "id": "P-01",
+                "required_level": "real_device_e2e",
+                "expected_outcome": "PASS",
+                "expected_test_count": 1,
+                "oracle": {
+                    "assertion": "restart reaches the ready state",
+                    "expected": "READY",
+                },
+            },
+            *[
+                {
+                    "id": case_id,
+                    "required_level": "real_device_e2e",
+                    "expected_outcome": "REJECT",
+                    "expected_test_count": 1,
+                    "oracle": {
+                        "assertion": assertion,
+                        "expected": "REJECTED",
+                    },
+                }
+                for case_id, assertion in (
+                    ("N-01", "an unknown service is rejected"),
+                    ("N-02", "an unauthorized action is rejected"),
+                    ("N-03", "an invalid device target is rejected"),
+                    ("N-04", "a stale request is rejected"),
+                )
+            ],
+            {
+                "id": "N-05",
+                "required_level": "deployment",
+                "expected_outcome": "REJECT",
+                "expected_test_count": 1,
+                "oracle": {
+                    "assertion": "a mismatched deployment digest is rejected",
+                    "expected": "REJECTED",
+                },
+            },
+        ],
     }
     body["contract_id"] = content_id("contract", body)
     return body
@@ -125,7 +164,12 @@ def valid_artifact_bundle(tmp_path: Path) -> dict[str, object]:
         "failed_test_count": 0,
         "ignored_test_count": 0,
         "exit_code": 0,
-        "oracle": {"assertion": "unit behavior", "observed": True},
+        "oracle": {
+            "assertion": "unit behavior is correct",
+            "expected": True,
+            "observed": True,
+            "passed": True,
+        },
         **evidence,
     }
     return {
@@ -151,7 +195,20 @@ def valid_test_bundle() -> dict[str, object]:
     tauri_artifact_id = "artifact-tauri-interaction"
     trace_artifact_id = "artifact-application-trace"
     return {
-        "contract": {"required_test_cases": ["P-01"]},
+        "contract": {
+            "required_test_cases": [
+                {
+                    "id": "P-01",
+                    "required_level": "tauri",
+                    "expected_outcome": "PASS",
+                    "expected_test_count": 1,
+                    "oracle": {
+                        "assertion": "window is visible",
+                        "expected": True,
+                    },
+                }
+            ]
+        },
         "artifacts": [
             {
                 "artifact_id": tauri_artifact_id,
@@ -184,7 +241,12 @@ def valid_test_bundle() -> dict[str, object]:
                 "failed_test_count": 0,
                 "ignored_test_count": 0,
                 "exit_code": 0,
-                "oracle": {"assertion": "window is visible", "observed": True},
+                "oracle": {
+                    "assertion": "window is visible",
+                    "expected": True,
+                    "observed": True,
+                    "passed": True,
+                },
                 "evidence": [tauri_artifact_id, trace_artifact_id],
             }
         ],

@@ -10,6 +10,10 @@ def codes(bundle):
     return [problem.code for problem in validate_tests(bundle)]
 
 
+def requirement(bundle):
+    return bundle["contract"]["required_test_cases"][0]
+
+
 def test_valid_test_bundle_has_no_issues(valid_test_bundle):
     assert validate_tests(valid_test_bundle) == []
 
@@ -45,6 +49,7 @@ def test_expected_outcome_must_match_status(
     record = valid_test_bundle["tests"][0]
     record["expected_outcome"] = expected_outcome
     record["status"] = status
+    requirement(valid_test_bundle)["expected_outcome"] = expected_outcome
 
     found = codes(valid_test_bundle)
     if expected_issue is None:
@@ -66,6 +71,17 @@ def test_expected_count_must_be_positive(valid_test_bundle):
     record["passed_test_count"] = 0
 
     assert "invalid_expected_test_count" in codes(valid_test_bundle)
+
+
+def test_zero_executed_does_not_cascade_relational_count_issues(valid_test_bundle):
+    record = valid_test_bundle["tests"][0]
+    record["executed_test_count"] = 0
+    record["passed_test_count"] = 0
+
+    found = codes(valid_test_bundle)
+    assert "zero_tests_executed" in found
+    assert "test_count_mismatch" not in found
+    assert "test_count_sum_mismatch" not in found
 
 
 @pytest.mark.parametrize(
@@ -108,6 +124,7 @@ def test_exact_layer_enum_is_accepted(valid_test_bundle, level):
     record = valid_test_bundle["tests"][0]
     record["required_level"] = level
     record["observed_level"] = level
+    requirement(valid_test_bundle)["required_level"] = level
     if level == "browser":
         valid_test_bundle["artifacts"][0]["kind"] = "browser-interaction"
         record["evidence"] = [valid_test_bundle["artifacts"][0]["artifact_id"]]
@@ -160,6 +177,7 @@ def test_each_dynamic_layer_requires_every_evidence_kind(
     record = valid_test_bundle["tests"][0]
     record["required_level"] = level
     record["observed_level"] = level
+    requirement(valid_test_bundle)["required_level"] = level
     for index, kind in enumerate(kinds):
         valid_test_bundle["artifacts"][index]["kind"] = kind
     record["evidence"] = [
@@ -234,8 +252,7 @@ def test_oracle_requires_explicit_structured_assertion_and_observation(
 ):
     valid_test_bundle["tests"][0]["oracle"] = value
 
-    expected = [] if value == {"assertion": True} else ["invalid_oracle"]
-    assert ("invalid_oracle" in codes(valid_test_bundle)) == bool(expected)
+    assert "invalid_oracle" in codes(valid_test_bundle)
 
 
 @pytest.mark.parametrize("value", [None, [], "artifact", [""], [7], [True]])
@@ -251,23 +268,60 @@ def test_unexpected_test_fields_are_rejected(valid_test_bundle):
     assert "unexpected_test_field" in codes(valid_test_bundle)
 
 
-@pytest.mark.parametrize("required", [None, [], "P-01", [""], [7], [True]])
-def test_required_test_cases_must_be_nonempty_string_list(
-    valid_test_bundle, required
-):
+@pytest.mark.parametrize("required", [None, [], "P-01"])
+def test_required_test_cases_must_be_nonempty_list(valid_test_bundle, required):
     valid_test_bundle["contract"]["required_test_cases"] = required
 
     assert "invalid_required_test_cases" in codes(valid_test_bundle)
 
 
+@pytest.mark.parametrize("required", [[""], [7], [True], [{}]])
+def test_required_test_case_items_must_be_closed_requirement_objects(
+    valid_test_bundle, required
+):
+    valid_test_bundle["contract"]["required_test_cases"] = required
+
+    assert "invalid_test_requirement" in codes(valid_test_bundle)
+
+
 def test_required_test_case_ids_must_be_unique(valid_test_bundle):
-    valid_test_bundle["contract"]["required_test_cases"] = ["P-01", "P-01"]
+    duplicate = deepcopy(requirement(valid_test_bundle))
+    valid_test_bundle["contract"]["required_test_cases"].append(duplicate)
 
     assert "duplicate_required_test_case" in codes(valid_test_bundle)
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda item: item.pop("required_level"),
+        lambda item: item.update(extra=True),
+        lambda item: item.update(id=""),
+        lambda item: item.update(required_level="TAURI"),
+        lambda item: item.update(expected_outcome="UNKNOWN"),
+        lambda item: item.update(expected_test_count=True),
+        lambda item: item.update(expected_test_count=0),
+        lambda item: item.update(oracle={"assertion": " ", "expected": True}),
+        lambda item: item.update(oracle={"assertion": "predicate", "expected": None}),
+        lambda item: item.update(
+            oracle={"assertion": "predicate", "expected": True, "extra": True}
+        ),
+    ],
+)
+def test_malformed_requirement_never_becomes_authority(
+    valid_test_bundle, mutation
+):
+    mutation(requirement(valid_test_bundle))
+
+    found = codes(valid_test_bundle)
+    assert "invalid_test_requirement" in found
+    assert "unexpected_test_record" in found
+
+
 def test_missing_required_test_is_rejected(valid_test_bundle):
-    valid_test_bundle["contract"]["required_test_cases"].append("N-01")
+    missing = deepcopy(requirement(valid_test_bundle))
+    missing["id"] = "N-01"
+    valid_test_bundle["contract"]["required_test_cases"].append(missing)
 
     assert "missing_required_test" in codes(valid_test_bundle)
 
@@ -332,6 +386,170 @@ def test_validation_is_deterministic_and_does_not_mutate(valid_test_bundle):
     assert valid_test_bundle == before
 
 
+def test_contract_rejects_self_relabelled_expected_outcome(valid_test_bundle):
+    record = valid_test_bundle["tests"][0]
+    record["expected_outcome"] = "REJECT"
+    record["status"] = "EXPECTED_REJECT"
+
+    assert "expected_outcome_contract_mismatch" in codes(valid_test_bundle)
+
+
+def test_contract_rejects_lowered_required_level(valid_test_bundle):
+    record = valid_test_bundle["tests"][0]
+    record["required_level"] = "browser"
+    record["observed_level"] = "browser"
+    valid_test_bundle["artifacts"][0]["kind"] = "browser-interaction"
+    record["evidence"] = [valid_test_bundle["artifacts"][0]["artifact_id"]]
+
+    assert "required_level_contract_mismatch" in codes(valid_test_bundle)
+
+
+def test_contract_rejects_lowered_expected_count(valid_test_bundle):
+    valid_test_bundle["contract"]["required_test_cases"] = [
+        {
+            "id": "P-01",
+            "required_level": "tauri",
+            "expected_outcome": "PASS",
+            "expected_test_count": 2,
+            "oracle": {"assertion": "window is visible", "expected": True},
+        }
+    ]
+
+    assert "expected_test_count_contract_mismatch" in codes(valid_test_bundle)
+
+
+@pytest.mark.parametrize(
+    "oracle",
+    [
+        {"anything": None},
+        {"assertion": True},
+        {"assertion": "window is visible", "expected": True, "passed": True},
+        {
+            "assertion": "   ",
+            "expected": True,
+            "observed": True,
+            "passed": True,
+        },
+        {
+            "assertion": "window is visible",
+            "expected": None,
+            "observed": True,
+            "passed": True,
+        },
+        {
+            "assertion": "window is visible",
+            "expected": True,
+            "observed": None,
+            "passed": True,
+        },
+        {
+            "assertion": "window is visible",
+            "expected": True,
+            "observed": True,
+            "passed": 1,
+        },
+        {
+            "assertion": "window is visible",
+            "expected": True,
+            "observed": True,
+            "passed": False,
+        },
+        {
+            "assertion": "window is visible",
+            "expected": True,
+            "observed": True,
+            "passed": True,
+            "extra": True,
+        },
+    ],
+)
+def test_meaningless_or_incomplete_oracle_is_rejected(valid_test_bundle, oracle):
+    valid_test_bundle["tests"][0]["oracle"] = oracle
+
+    assert "invalid_oracle" in codes(valid_test_bundle)
+
+
+def test_oracle_assertion_must_match_contract(valid_test_bundle):
+    valid_test_bundle["tests"][0]["oracle"] = {
+        "assertion": "a different predicate",
+        "expected": True,
+        "observed": True,
+        "passed": True,
+    }
+
+    assert "oracle_assertion_contract_mismatch" in codes(valid_test_bundle)
+
+
+def test_oracle_expected_value_must_match_contract(valid_test_bundle):
+    valid_test_bundle["tests"][0]["oracle"] = {
+        "assertion": "window is visible",
+        "expected": False,
+        "observed": True,
+        "passed": True,
+    }
+
+    assert "oracle_expected_contract_mismatch" in codes(valid_test_bundle)
+
+
+def test_environment_fingerprint_must_be_lowercase_sha256(valid_test_bundle):
+    valid_test_bundle["tests"][0]["environment_fingerprint"] = "x"
+
+    assert "invalid_environment_fingerprint" in codes(valid_test_bundle)
+
+
+@pytest.mark.parametrize(
+    "fingerprint",
+    ["sha256:" + "A" * 64, "sha256:" + "0" * 63, "0" * 64, None, True],
+)
+def test_malformed_environment_fingerprints_fail_closed(
+    valid_test_bundle, fingerprint
+):
+    valid_test_bundle["tests"][0]["environment_fingerprint"] = fingerprint
+
+    assert "invalid_environment_fingerprint" in codes(valid_test_bundle)
+
+
+def test_contract_schema_closes_authoritative_requirements(valid_contract):
+    assert validate_schema(valid_contract, "verification-contract.v1.schema.json") == []
+
+    valid_contract["required_test_cases"][0]["extra"] = True
+
+    assert "$.required_test_cases[0]" in {
+        problem.location
+        for problem in validate_schema(
+            valid_contract, "verification-contract.v1.schema.json"
+        )
+    }
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("required_level",), "TAURI"),
+        (("expected_outcome",), "UNKNOWN"),
+        (("expected_test_count",), 0),
+        (("expected_test_count",), True),
+        (("oracle", "assertion"), "   "),
+        (("oracle", "expected"), None),
+    ],
+)
+def test_contract_schema_rejects_invalid_requirement_fields(
+    valid_contract, path, value
+):
+    target = valid_contract["required_test_cases"][0]
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+
+    expected_location = "$.required_test_cases[0]." + ".".join(path)
+    assert expected_location in {
+        problem.location
+        for problem in validate_schema(
+            valid_contract, "verification-contract.v1.schema.json"
+        )
+    }
+
+
 def test_evidence_bundle_schema_closes_test_and_artifact_records(
     valid_test_bundle, valid_candidate, valid_permit
 ):
@@ -367,6 +585,8 @@ def test_evidence_bundle_schema_closes_test_and_artifact_records(
         ("command", ""),
         ("cwd", ""),
         ("environment_fingerprint", ""),
+        ("environment_fingerprint", "x"),
+        ("environment_fingerprint", "sha256:" + "A" * 64),
         ("expected_test_count", 0),
         ("executed_test_count", -1),
         ("passed_test_count", -1),
@@ -398,6 +618,61 @@ def test_evidence_bundle_schema_rejects_invalid_test_fields(
         problem.location
         for problem in validate_schema(bundle, "evidence-bundle.v1.schema.json")
     }
+
+
+@pytest.mark.parametrize(
+    "oracle",
+    [
+        {
+            "assertion": "   ",
+            "expected": True,
+            "observed": True,
+            "passed": True,
+        },
+        {
+            "assertion": "window is visible",
+            "expected": None,
+            "observed": True,
+            "passed": True,
+        },
+        {
+            "assertion": "window is visible",
+            "expected": True,
+            "observed": None,
+            "passed": True,
+        },
+        {
+            "assertion": "window is visible",
+            "expected": True,
+            "observed": True,
+            "passed": False,
+        },
+        {
+            "assertion": "window is visible",
+            "expected": True,
+            "observed": True,
+            "passed": True,
+            "extra": True,
+        },
+    ],
+)
+def test_evidence_bundle_schema_rejects_invalid_oracle_shape(
+    valid_test_bundle, valid_candidate, valid_permit, oracle
+):
+    bundle = {
+        "schema_version": "gawain.evidence-bundle.v1",
+        "run_id": "run-test-schema",
+        "candidate": valid_candidate,
+        "permit": valid_permit,
+        "environment": {},
+        "claims": [],
+        "traces": [],
+        "verdict": {},
+        **valid_test_bundle,
+    }
+    bundle["tests"][0]["oracle"] = oracle
+
+    assert validate_schema(bundle, "evidence-bundle.v1.schema.json")
 
 
 def test_evidence_bundle_schema_requires_artifact_kind(
