@@ -17,6 +17,27 @@ RUN_ID = re.compile(r"run-[A-Za-z0-9._-]+\Z")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
+class _DuplicateJsonKey(ValueError):
+    pass
+
+
+class _InvalidJsonConstant(ValueError):
+    pass
+
+
+def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJsonKey
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(_value: str) -> object:
+    raise _InvalidJsonConstant
+
+
 def _valid_context(value: object) -> bool:
     try:
         if not isinstance(value, Mapping) or set(value) != set(CONTEXT_FIELDS):
@@ -59,7 +80,29 @@ def validate_trace_file(path: Path, expected_context: object) -> list[Validation
                     continue
                 nonblank_lines += 1
                 try:
-                    value = json.loads(line)
+                    value = json.loads(
+                        line,
+                        object_pairs_hook=_strict_object,
+                        parse_constant=_reject_json_constant,
+                    )
+                except _DuplicateJsonKey:
+                    problems.append(
+                        issue(
+                            "duplicate_json_key",
+                            f"line {line_number}",
+                            "duplicate JSON object member is forbidden",
+                        )
+                    )
+                    continue
+                except _InvalidJsonConstant:
+                    problems.append(
+                        issue(
+                            "invalid_json",
+                            f"line {line_number}",
+                            "non-finite JSON number is forbidden",
+                        )
+                    )
+                    continue
                 except json.JSONDecodeError:
                     problems.append(issue("trace_json", f"line {line_number}", "invalid JSON event"))
                     continue

@@ -44,6 +44,58 @@ def test_bad_json_or_nonobject_is_line_numbered(tmp_path, expected_trace_context
     assert issues and all(x.location.startswith("line 1") for x in issues)
 
 
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        '"token":"live-secret","token":"[REDACTED]"',
+        '"ordinary":1,"ordinary":2',
+        '"nested":{"ordinary":1,"ordinary":2}',
+    ],
+)
+def test_duplicate_json_members_are_rejected_before_validation(
+    valid_trace_file, expected_trace_context, attributes
+):
+    lines = valid_trace_file.read_text(encoding="utf-8").splitlines()
+    event = json.loads(lines[0])
+    prefix = json.dumps({key: value for key, value in event.items() if key != "attributes"})
+    lines[0] = prefix[:-1] + f',"attributes":{{{attributes}}}}}'
+    valid_trace_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    issues = validate_trace_file(valid_trace_file, expected_trace_context)
+
+    assert any(x.code == "duplicate_json_key" and x.location == "line 1" for x in issues)
+    assert "live-secret" not in repr(issues)
+    assert "token" not in repr(issues)
+
+
+def test_duplicate_top_level_json_member_is_rejected(valid_trace_file, expected_trace_context):
+    lines = valid_trace_file.read_text(encoding="utf-8").splitlines()
+    lines[0] = '{"schema_version":"gawain.trace-event.v1",' + lines[0][1:]
+    valid_trace_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    issues = validate_trace_file(valid_trace_file, expected_trace_context)
+    assert any(x.code == "duplicate_json_key" and x.location == "line 1" for x in issues)
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_nonfinite_json_numbers_are_rejected(valid_trace_file, expected_trace_context, constant):
+    lines = valid_trace_file.read_text(encoding="utf-8").splitlines()
+    event = json.loads(lines[0])
+    prefix = json.dumps({key: value for key, value in event.items() if key != "attributes"})
+    lines[0] = prefix[:-1] + f',"attributes":{{"measurement":{constant}}}}}'
+    valid_trace_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    issues = validate_trace_file(valid_trace_file, expected_trace_context)
+
+    assert any(x.code == "invalid_json" and x.location == "line 1" for x in issues)
+
+
+def test_finite_json_number_in_telemetry_remains_valid(valid_trace_file, expected_trace_context):
+    events = load_events(valid_trace_file)
+    events[0]["attributes"]["measurement"] = 1.25
+    write_events(valid_trace_file, events)
+    assert validate_trace_file(valid_trace_file, expected_trace_context) == []
+
+
 def test_invalid_utf8_missing_file_and_blank_policy(tmp_path, expected_trace_context, valid_trace_file):
     bad = tmp_path / "utf8.jsonl"
     bad.write_bytes(b"\xff\n")
@@ -63,6 +115,14 @@ def test_schema_issue_has_line_location(valid_trace_file, expected_trace_context
     write_events(valid_trace_file, events)
     issues = validate_trace_file(valid_trace_file, expected_trace_context)
     assert any(x.code == "schema_error" and x.location.startswith("line 2") for x in issues)
+
+
+@pytest.mark.parametrize("field,value", [("unexpected", True), ("event_kind", "UNKNOWN")])
+def test_schema_rejects_extra_top_level_fields_and_unknown_event_kind(
+    valid_trace_file, expected_trace_context, field, value
+):
+    mutate(valid_trace_file, lambda events: events[0].__setitem__(field, value))
+    assert "schema_error" in codes(valid_trace_file, expected_trace_context)
 
 
 @pytest.mark.parametrize("field,value", [
@@ -129,6 +189,18 @@ def test_graph_defects(valid_trace_file, expected_trace_context, change, code):
     assert code in codes(valid_trace_file, expected_trace_context)
 
 
+def test_timestamp_proximity_cannot_repair_missing_explicit_parent(
+    valid_trace_file, expected_trace_context
+):
+    events = load_events(valid_trace_file)
+    for event in events:
+        event["ts"] = "2026-08-25T03:00:00.000Z"
+        if event["span_id"] == "fedcba9876543210":
+            event["parent_span_id"] = "1111111111111111"
+    write_events(valid_trace_file, events)
+    assert "missing_parent_span" in codes(valid_trace_file, expected_trace_context)
+
+
 @pytest.mark.parametrize("kind,attributes", [
     ("STATE", {}), ("STATE", {"from_state": "", "to_state": "x"}),
     ("FAIL", {"caller": "x", "callee": "x", "phase": "x", "error_class": "x", "message": "x"}),
@@ -169,6 +241,16 @@ def test_pem_any_string_is_blocked_without_leak(header):
     issues = validate_no_secrets({"safe": ["prefix " + header + " material"]})
     assert issues[0].code == "private_key_material"
     assert header not in repr(issues)
+
+
+@pytest.mark.parametrize("header", ["-----BEGIN PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----"])
+def test_pem_in_nested_mapping_key_is_blocked_without_leak(header):
+    material = "prefix " + header + " suffix"
+    issues = validate_no_secrets({"nested": {material: "value"}})
+    assert any(x.code == "private_key_material" for x in issues)
+    assert material not in repr(issues)
+    assert header not in repr(issues)
+    assert all(material not in x.location and material not in x.message for x in issues)
 
 
 def test_trace_secret_is_line_numbered_excluded_and_never_leaked(valid_trace_file, expected_trace_context):

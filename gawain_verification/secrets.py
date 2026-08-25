@@ -57,6 +57,14 @@ def validate_no_secrets(value: object, location: str = "$") -> list[ValidationIs
                 continue
             for key, child in reversed(items):
                 child_location = _child_location(current_location, key)
+                if isinstance(key, str) and any(header in key for header in PEM_HEADERS):
+                    problems.append(
+                        issue(
+                            "private_key_material",
+                            f"{current_location}[key]",
+                            "private key material is forbidden",
+                        )
+                    )
                 if _key_name(key) in SENSITIVE_KEYS and not (isinstance(child, str) and child in REDACTED):
                     problems.append(issue("secret_key", child_location, "sensitive field must contain an approved redaction marker"))
                 stack.append((child, child_location, depth + 1))
