@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gawain.invalid/schemas/trace-event.v1.schema.json",
+  "type": "object",
+  "required": [
+    "schema_version", "event_id", "ts", "level", "event_kind", "run_id",
+    "contract_id", "candidate_id", "test_case_id", "attempt_id",
+    "operation_id", "trace_id", "span_id", "parent_span_id", "service",
+    "instance_id", "sequence", "attributes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "gawain.trace-event.v1"},
+    "event_id": {"type": "string", "minLength": 1},
+    "ts": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"},
+    "level": {"const": "INFO"},
+    "event_kind": {"enum": ["SPAN_START", "SPAN_END", "STATE", "FAIL", "ERROR"]},
+    "run_id": {"type": "string", "pattern": "^run-[A-Za-z0-9._-]+$"},
+    "contract_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "candidate_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "test_case_id": {"type": "string", "minLength": 1},
+    "attempt_id": {"type": "string", "minLength": 1},
+    "operation_id": {"$ref": "#/$defs/traceId"},
+    "trace_id": {"$ref": "#/$defs/traceId"},
+    "span_id": {"$ref": "#/$defs/spanId"},
+    "parent_span_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/spanId"}]},
+    "service": {"type": "string", "minLength": 1},
+    "instance_id": {"type": "string", "minLength": 1},
+    "sequence": {"type": "integer", "minimum": 0},
+    "attributes": {"type": "object"}
+  },
+  "$defs": {
+    "traceId": {"type": "string", "pattern": "^(?!0{32}$)[0-9a-f]{32}$"},
+    "spanId": {"type": "string", "pattern": "^(?!0{16}$)[0-9a-f]{16}$"},
+    "nonempty": {"type": "string", "minLength": 1}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"event_kind": {"const": "STATE"}}, "required": ["event_kind"]},
+      "then": {"properties": {"attributes": {"required": ["from_state", "to_state"], "properties": {"from_state": {"$ref": "#/$defs/nonempty"}, "to_state": {"$ref": "#/$defs/nonempty"}}}}}
+    },
+    {
+      "if": {"properties": {"event_kind": {"const": "FAIL"}}, "required": ["event_kind"]},
+      "then": {"properties": {"attributes": {"required": ["caller", "callee", "phase", "error_class", "message", "cause"], "properties": {"caller": {"$ref": "#/$defs/nonempty"}, "callee": {"$ref": "#/$defs/nonempty"}, "phase": {"$ref": "#/$defs/nonempty"}, "error_class": {"$ref": "#/$defs/nonempty"}, "message": {"$ref": "#/$defs/nonempty"}, "cause": {"$ref": "#/$defs/nonempty"}}}}}
+    },
+    {
+      "if": {"properties": {"event_kind": {"const": "ERROR"}}, "required": ["event_kind"]},
+      "then": {"properties": {"attributes": {"required": ["error_class", "message", "cause"], "properties": {"error_class": {"$ref": "#/$defs/nonempty"}, "message": {"$ref": "#/$defs/nonempty"}, "cause": {"$ref": "#/$defs/nonempty"}}}}}
+    },
+    {
+      "if": {"properties": {"event_kind": {"const": "SPAN_END"}}, "required": ["event_kind"]},
+      "then": {"properties": {"attributes": {"required": ["status"], "properties": {"status": {"enum": ["OK", "ERROR", "CANCELLED", "TIMEOUT"]}}}}}
+    }
+  ]
+}

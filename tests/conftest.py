@@ -1,5 +1,6 @@
 from copy import deepcopy
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -141,6 +142,54 @@ def bundle_root(tmp_path: Path) -> Path:
 @pytest.fixture
 def cloned():
     return deepcopy
+
+
+@pytest.fixture
+def expected_trace_context() -> dict[str, str]:
+    trace_id = "0123456789abcdef0123456789abcdef"
+    return {
+        "run_id": "run-pilot-001",
+        "contract_id": "sha256:" + "a" * 64,
+        "candidate_id": "sha256:" + "b" * 64,
+        "test_case_id": "P-01",
+        "attempt_id": "attempt-1",
+        "operation_id": trace_id,
+        "trace_id": trace_id,
+    }
+
+
+@pytest.fixture
+def valid_trace_file(tmp_path: Path, expected_trace_context) -> Path:
+    root = "0123456789abcdef"
+    child = "fedcba9876543210"
+    events = []
+    for sequence, kind, span, parent in (
+        (1, "SPAN_START", root, None),
+        (2, "SPAN_START", child, root),
+        (3, "SPAN_END", child, root),
+        (4, "SPAN_END", root, None),
+    ):
+        events.append(
+            {
+                "schema_version": "gawain.trace-event.v1",
+                "event_id": f"evt-{sequence:04d}",
+                "ts": f"2026-08-25T03:00:0{sequence}.000Z",
+                "level": "INFO",
+                "event_kind": kind,
+                **expected_trace_context,
+                "span_id": span,
+                "parent_span_id": parent,
+                "service": "frontend.renderer",
+                "instance_id": "skyline-test-1",
+                "sequence": sequence,
+                "attributes": {"status": "OK"} if kind == "SPAN_END" else {},
+            }
+        )
+    path = tmp_path / "application.jsonl"
+    path.write_text(
+        "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+    )
+    return path
 
 
 @pytest.fixture

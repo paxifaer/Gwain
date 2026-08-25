@@ -13,6 +13,7 @@ from .issues import ValidationIssue, issue
 _SCHEMA_RESOURCES = {
     "verification-contract.v1.schema.json": "verification-contract.v1.schema.json",
     "evidence-bundle.v1.schema.json": "evidence-bundle.v1.schema.json",
+    "trace-event.v1.schema.json": "trace-event.v1.schema.json",
 }
 _FORMAT_CHECKER = FormatChecker()
 
