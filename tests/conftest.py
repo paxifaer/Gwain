@@ -110,18 +110,82 @@ def valid_artifact_bundle(tmp_path: Path) -> dict[str, object]:
     artifact_path.write_bytes(content)
 
     evidence = {"evidence": [artifact_id]}
+    test_evidence = {
+        "id": "P-01",
+        "required_level": "unit",
+        "observed_level": "unit",
+        "expected_outcome": "PASS",
+        "status": "PASS",
+        "command": "pytest tests/test_unit.py -q",
+        "cwd": "/workspace",
+        "environment_fingerprint": "sha256:" + "0" * 64,
+        "expected_test_count": 1,
+        "executed_test_count": 1,
+        "passed_test_count": 1,
+        "failed_test_count": 0,
+        "ignored_test_count": 0,
+        "exit_code": 0,
+        "oracle": {"assertion": "unit behavior", "observed": True},
+        **evidence,
+    }
     return {
         "artifacts": [
             {
                 "artifact_id": artifact_id,
+                "kind": "test-evidence",
                 "path": "artifacts/evidence.json",
                 "bytes": len(content),
                 "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
             }
         ],
-        "tests": [deepcopy(evidence)],
+        "tests": [deepcopy(test_evidence)],
         "claims": [deepcopy(evidence)],
         "traces": [deepcopy(evidence)],
         "environment": deepcopy(evidence),
         "deployment": deepcopy(evidence),
+    }
+
+
+@pytest.fixture
+def valid_test_bundle() -> dict[str, object]:
+    tauri_artifact_id = "artifact-tauri-interaction"
+    trace_artifact_id = "artifact-application-trace"
+    return {
+        "contract": {"required_test_cases": ["P-01"]},
+        "artifacts": [
+            {
+                "artifact_id": tauri_artifact_id,
+                "kind": "tauri-interaction",
+                "path": "artifacts/tauri-interaction.json",
+                "bytes": 2,
+                "sha256": "sha256:" + "1" * 64,
+            },
+            {
+                "artifact_id": trace_artifact_id,
+                "kind": "application-trace",
+                "path": "artifacts/application-trace.jsonl",
+                "bytes": 3,
+                "sha256": "sha256:" + "2" * 64,
+            },
+        ],
+        "tests": [
+            {
+                "id": "P-01",
+                "required_level": "tauri",
+                "observed_level": "tauri",
+                "expected_outcome": "PASS",
+                "status": "PASS",
+                "command": "pytest tests/test_ui.py -q",
+                "cwd": "/workspace",
+                "environment_fingerprint": "sha256:" + "3" * 64,
+                "expected_test_count": 1,
+                "executed_test_count": 1,
+                "passed_test_count": 1,
+                "failed_test_count": 0,
+                "ignored_test_count": 0,
+                "exit_code": 0,
+                "oracle": {"assertion": "window is visible", "observed": True},
+                "evidence": [tauri_artifact_id, trace_artifact_id],
+            }
+        ],
     }

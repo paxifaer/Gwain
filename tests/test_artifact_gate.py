@@ -580,6 +580,7 @@ def test_evidence_bundle_schema_closes_artifact_records(
     ("field", "value"),
     [
         ("artifact_id", ""),
+        ("kind", ""),
         ("path", ""),
         ("bytes", -1),
         ("sha256", "sha256:" + "A" * 64),
