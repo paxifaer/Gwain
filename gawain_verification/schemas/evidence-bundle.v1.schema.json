@@ -83,12 +83,13 @@
           "oracle": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["assertion", "expected", "observed", "passed"],
+            "required": ["assertion", "operator", "expected", "observed", "passed"],
             "properties": {
               "assertion": {"type": "string", "pattern": "\\S"},
+              "operator": {"const": "equals"},
               "expected": {"not": {"type": "null"}},
               "observed": {"not": {"type": "null"}},
-              "passed": {"const": true}
+              "passed": {"type": "boolean"}
             }
           },
           "evidence": {

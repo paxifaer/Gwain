@@ -1,3 +1,5 @@
+"""Pre-release v1 semantics; oracle values allow depth 64 and 10,000 nodes each."""
+
 from __future__ import annotations
 
 from collections import Counter
@@ -51,9 +53,13 @@ TEST_FIELDS = frozenset(
 REQUIREMENT_FIELDS = frozenset(
     {"id", "required_level", "expected_outcome", "expected_test_count", "oracle"}
 )
-REQUIREMENT_ORACLE_FIELDS = frozenset({"assertion", "expected"})
-RECORD_ORACLE_FIELDS = frozenset({"assertion", "expected", "observed", "passed"})
+REQUIREMENT_ORACLE_FIELDS = frozenset({"assertion", "operator", "expected"})
+RECORD_ORACLE_FIELDS = frozenset(
+    {"assertion", "operator", "expected", "observed", "passed"}
+)
 ENVIRONMENT_FINGERPRINT_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+MAX_ORACLE_JSON_DEPTH = 64
+MAX_ORACLE_JSON_NODES = 10_000
 
 
 def _artifact_kinds(
@@ -85,34 +91,74 @@ def _artifact_kinds(
     }
 
 
-def _is_json_value(value: object) -> bool:
-    if value is None or isinstance(value, (str, bool, int)):
-        return True
-    if isinstance(value, float):
-        return math.isfinite(value)
-    if isinstance(value, list):
-        return all(_is_json_value(item) for item in value)
-    if isinstance(value, Mapping):
-        return all(
-            isinstance(key, str) and _is_json_value(item)
-            for key, item in value.items()
-        )
-    return False
+def _is_bounded_json_value(value: object) -> bool:
+    stack: list[tuple[bool, object, int]] = [(True, value, 0)]
+    active_containers: set[int] = set()
+    node_count = 0
+
+    while stack:
+        entering, current, depth = stack.pop()
+        if not entering:
+            active_containers.remove(id(current))
+            continue
+
+        node_count += 1
+        if node_count > MAX_ORACLE_JSON_NODES or depth > MAX_ORACLE_JSON_DEPTH:
+            return False
+        if current is None or type(current) in {str, bool, int}:
+            continue
+        if type(current) is float:
+            if not math.isfinite(current):
+                return False
+            continue
+        if type(current) is list:
+            children = current
+        elif type(current) is dict:
+            if not all(type(key) is str for key in current):
+                return False
+            children = list(current.values())
+        else:
+            return False
+
+        identity = id(current)
+        if identity in active_containers:
+            return False
+        active_containers.add(identity)
+        stack.append((False, current, depth))
+        stack.extend((True, child, depth + 1) for child in reversed(children))
+
+    return True
 
 
-def _exact_json_equal(left: object, right: object) -> bool:
-    if type(left) is not type(right):
-        return False
-    if isinstance(left, list):
-        return len(left) == len(right) and all(
-            _exact_json_equal(left_item, right_item)
-            for left_item, right_item in zip(left, right)
-        )
-    if isinstance(left, Mapping):
-        return set(left) == set(right) and all(
-            _exact_json_equal(left[key], right[key]) for key in left
-        )
-    return left == right
+def _bounded_json_equal(left: object, right: object) -> bool:
+    stack: list[tuple[object, object, int]] = [(left, right, 0)]
+    node_count = 0
+    while stack:
+        left_value, right_value, depth = stack.pop()
+        node_count += 1
+        if node_count > MAX_ORACLE_JSON_NODES or depth > MAX_ORACLE_JSON_DEPTH:
+            return False
+        if type(left_value) is not type(right_value):
+            return False
+        if type(left_value) is list:
+            if len(left_value) != len(right_value):
+                return False
+            stack.extend(
+                (left_item, right_item, depth + 1)
+                for left_item, right_item in zip(
+                    reversed(left_value), reversed(right_value)
+                )
+            )
+        elif type(left_value) is dict:
+            if left_value.keys() != right_value.keys():
+                return False
+            stack.extend(
+                (left_value[key], right_value[key], depth + 1)
+                for key in reversed(left_value)
+            )
+        elif left_value != right_value:
+            return False
+    return True
 
 
 def _valid_requirement(requirement: Mapping[object, object]) -> bool:
@@ -132,8 +178,9 @@ def _valid_requirement(requirement: Mapping[object, object]) -> bool:
         and set(oracle) == REQUIREMENT_ORACLE_FIELDS
         and isinstance(oracle.get("assertion"), str)
         and bool(oracle.get("assertion").strip())
+        and oracle.get("operator") == "equals"
         and oracle.get("expected") is not None
-        and _is_json_value(oracle.get("expected"))
+        and _is_bounded_json_value(oracle.get("expected"))
     )
 
 
@@ -273,7 +320,7 @@ def _validate_record(
                 "observed test level must exactly match the required level",
             )
         )
-    if requirement is not None and not _exact_json_equal(
+    if requirement is not None and not _bounded_json_equal(
         required_level, requirement["required_level"]
     ):
         problems.append(
@@ -326,7 +373,7 @@ def _validate_record(
                     "positive test must report PASS",
                 )
             )
-    if requirement is not None and not _exact_json_equal(
+    if requirement is not None and not _bounded_json_equal(
         expected_outcome, requirement["expected_outcome"]
     ):
         problems.append(
@@ -397,7 +444,7 @@ def _validate_record(
             )
         )
 
-    if requirement is not None and not _exact_json_equal(
+    if requirement is not None and not _bounded_json_equal(
         record.get("expected_test_count"), requirement["expected_test_count"]
     ):
         problems.append(
@@ -448,23 +495,44 @@ def _validate_record(
         and set(oracle) == RECORD_ORACLE_FIELDS
         and isinstance(oracle.get("assertion"), str)
         and bool(oracle.get("assertion").strip())
+        and oracle.get("operator") == "equals"
         and oracle.get("expected") is not None
-        and _is_json_value(oracle.get("expected"))
+        and _is_bounded_json_value(oracle.get("expected"))
         and oracle.get("observed") is not None
-        and _is_json_value(oracle.get("observed"))
-        and oracle.get("passed") is True
+        and _is_bounded_json_value(oracle.get("observed"))
+        and type(oracle.get("passed")) is bool
     )
     if not oracle_valid:
         problems.append(
             issue(
                 "invalid_oracle",
                 f"{location}.oracle",
-                "oracle must have an assertion, expected and observed values, and passed true",
+                "oracle must have a bounded equals assertion and a boolean result",
             )
         )
+    else:
+        computed_result = _bounded_json_equal(
+            oracle["expected"], oracle["observed"]
+        )
+        if oracle["passed"] is not computed_result:
+            problems.append(
+                issue(
+                    "oracle_passed_mismatch",
+                    f"{location}.oracle.passed",
+                    "oracle passed must equal the independently computed result",
+                )
+            )
+        if not computed_result:
+            problems.append(
+                issue(
+                    "oracle_result_failed",
+                    f"{location}.oracle.observed",
+                    "oracle observed value does not equal the expected value",
+                )
+            )
     if requirement is not None and isinstance(oracle, Mapping):
         requirement_oracle = requirement["oracle"]
-        if not _exact_json_equal(
+        if not _bounded_json_equal(
             oracle.get("assertion"), requirement_oracle["assertion"]
         ):
             problems.append(
@@ -474,7 +542,17 @@ def _validate_record(
                     "oracle assertion must match the contract requirement",
                 )
             )
-        if not _exact_json_equal(
+        if not _bounded_json_equal(
+            oracle.get("operator"), requirement_oracle["operator"]
+        ):
+            problems.append(
+                issue(
+                    "oracle_operator_contract_mismatch",
+                    f"{location}.oracle.operator",
+                    "oracle operator must match the contract requirement",
+                )
+            )
+        if not _bounded_json_equal(
             oracle.get("expected"), requirement_oracle["expected"]
         ):
             problems.append(

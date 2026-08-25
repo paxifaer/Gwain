@@ -29,6 +29,7 @@ def valid_contract() -> dict[str, object]:
                 "expected_test_count": 1,
                 "oracle": {
                     "assertion": "restart reaches the ready state",
+                    "operator": "equals",
                     "expected": "READY",
                 },
             },
@@ -40,6 +41,7 @@ def valid_contract() -> dict[str, object]:
                     "expected_test_count": 1,
                     "oracle": {
                         "assertion": assertion,
+                        "operator": "equals",
                         "expected": "REJECTED",
                     },
                 }
@@ -57,6 +59,7 @@ def valid_contract() -> dict[str, object]:
                 "expected_test_count": 1,
                 "oracle": {
                     "assertion": "a mismatched deployment digest is rejected",
+                    "operator": "equals",
                     "expected": "REJECTED",
                 },
             },
@@ -166,6 +169,7 @@ def valid_artifact_bundle(tmp_path: Path) -> dict[str, object]:
         "exit_code": 0,
         "oracle": {
             "assertion": "unit behavior is correct",
+            "operator": "equals",
             "expected": True,
             "observed": True,
             "passed": True,
@@ -204,6 +208,7 @@ def valid_test_bundle() -> dict[str, object]:
                     "expected_test_count": 1,
                     "oracle": {
                         "assertion": "window is visible",
+                        "operator": "equals",
                         "expected": True,
                     },
                 }
@@ -243,6 +248,7 @@ def valid_test_bundle() -> dict[str, object]:
                 "exit_code": 0,
                 "oracle": {
                     "assertion": "window is visible",
+                    "operator": "equals",
                     "expected": True,
                     "observed": True,
                     "passed": True,

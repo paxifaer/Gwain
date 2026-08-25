@@ -49,9 +49,10 @@
           "oracle": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["assertion", "expected"],
+            "required": ["assertion", "operator", "expected"],
             "properties": {
               "assertion": {"type": "string", "pattern": "\\S"},
+              "operator": {"const": "equals"},
               "expected": {"not": {"type": "null"}}
             }
           }

@@ -411,7 +411,11 @@ def test_contract_rejects_lowered_expected_count(valid_test_bundle):
             "required_level": "tauri",
             "expected_outcome": "PASS",
             "expected_test_count": 2,
-            "oracle": {"assertion": "window is visible", "expected": True},
+            "oracle": {
+                "assertion": "window is visible",
+                "operator": "equals",
+                "expected": True,
+            },
         }
     ]
 
@@ -472,6 +476,7 @@ def test_meaningless_or_incomplete_oracle_is_rejected(valid_test_bundle, oracle)
 def test_oracle_assertion_must_match_contract(valid_test_bundle):
     valid_test_bundle["tests"][0]["oracle"] = {
         "assertion": "a different predicate",
+        "operator": "equals",
         "expected": True,
         "observed": True,
         "passed": True,
@@ -483,12 +488,128 @@ def test_oracle_assertion_must_match_contract(valid_test_bundle):
 def test_oracle_expected_value_must_match_contract(valid_test_bundle):
     valid_test_bundle["tests"][0]["oracle"] = {
         "assertion": "window is visible",
+        "operator": "equals",
         "expected": False,
         "observed": True,
         "passed": True,
     }
 
     assert "oracle_expected_contract_mismatch" in codes(valid_test_bundle)
+
+
+def test_oracle_operator_is_required(valid_test_bundle):
+    del valid_test_bundle["tests"][0]["oracle"]["operator"]
+
+    assert "invalid_oracle" in codes(valid_test_bundle)
+
+
+def test_oracle_operator_must_match_contract(valid_test_bundle):
+    requirement(valid_test_bundle)["oracle"]["operator"] = "equals"
+    valid_test_bundle["tests"][0]["oracle"]["operator"] = "contains"
+
+    assert "oracle_operator_contract_mismatch" in codes(valid_test_bundle)
+
+
+def test_oracle_rejects_contradictory_passed_true(valid_test_bundle):
+    oracle = valid_test_bundle["tests"][0]["oracle"]
+    oracle["observed"] = False
+    oracle["passed"] = True
+
+    found = codes(valid_test_bundle)
+    assert "oracle_passed_mismatch" in found
+    assert "oracle_result_failed" in found
+
+
+def test_oracle_computed_failure_is_rejected_even_when_reported_false(
+    valid_test_bundle,
+):
+    oracle = valid_test_bundle["tests"][0]["oracle"]
+    oracle["observed"] = False
+    oracle["passed"] = False
+
+    assert "oracle_result_failed" in codes(valid_test_bundle)
+
+
+def test_oracle_equality_distinguishes_true_from_one(valid_test_bundle):
+    oracle = valid_test_bundle["tests"][0]["oracle"]
+    oracle["observed"] = 1
+    oracle["passed"] = False
+
+    assert "oracle_result_failed" in codes(valid_test_bundle)
+
+
+def nested_value(depth):
+    value = True
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def set_oracle_values(valid_test_bundle, expected, observed, passed=True):
+    requirement(valid_test_bundle)["oracle"]["expected"] = expected
+    oracle = valid_test_bundle["tests"][0]["oracle"]
+    oracle["expected"] = expected
+    oracle["observed"] = observed
+    oracle["passed"] = passed
+
+
+def test_oracle_accepts_maximum_json_depth(valid_test_bundle):
+    value = nested_value(64)
+    set_oracle_values(valid_test_bundle, value, deepcopy(value))
+
+    assert validate_tests(valid_test_bundle) == []
+
+
+def test_oracle_rejects_more_than_maximum_json_depth_without_recursion_error(
+    valid_test_bundle,
+):
+    value = nested_value(1_101)
+    set_oracle_values(valid_test_bundle, value, value)
+
+    assert "invalid_oracle" in codes(valid_test_bundle)
+
+
+def test_malformed_deep_contract_requirement_is_not_authority(valid_test_bundle):
+    requirement(valid_test_bundle)["oracle"]["expected"] = nested_value(1_101)
+
+    found = codes(valid_test_bundle)
+    assert "invalid_test_requirement" in found
+    assert "unexpected_test_record" in found
+
+
+@pytest.mark.parametrize("container_kind", ["list", "dict"])
+def test_oracle_rejects_cyclic_programmatic_values_without_crashing(
+    valid_test_bundle, container_kind
+):
+    if container_kind == "list":
+        value = []
+        value.append(value)
+    else:
+        value = {}
+        value["self"] = value
+    set_oracle_values(valid_test_bundle, value, value)
+
+    before_oracle = valid_test_bundle["tests"][0]["oracle"]
+    assert "invalid_oracle" in codes(valid_test_bundle)
+    assert valid_test_bundle["tests"][0]["oracle"] is before_oracle
+    if container_kind == "list":
+        assert value[0] is value
+    else:
+        assert value["self"] is value
+
+
+def test_oracle_accepts_maximum_aggregate_json_nodes(valid_test_bundle):
+    value = [None] * 9_999
+    set_oracle_values(valid_test_bundle, value, list(value))
+
+    assert validate_tests(valid_test_bundle) == []
+
+
+def test_oracle_rejects_oversized_aggregate_json_value(valid_test_bundle):
+    value = [None] * 10_000
+    set_oracle_values(valid_test_bundle, value, value)
+
+    assert "invalid_oracle" in codes(valid_test_bundle)
 
 
 def test_environment_fingerprint_must_be_lowercase_sha256(valid_test_bundle):
@@ -530,6 +651,7 @@ def test_contract_schema_closes_authoritative_requirements(valid_contract):
         (("expected_test_count",), 0),
         (("expected_test_count",), True),
         (("oracle", "assertion"), "   "),
+        (("oracle", "operator"), "contains"),
         (("oracle", "expected"), None),
     ],
 )
@@ -631,6 +753,13 @@ def test_evidence_bundle_schema_rejects_invalid_test_fields(
         },
         {
             "assertion": "window is visible",
+            "operator": "contains",
+            "expected": True,
+            "observed": True,
+            "passed": True,
+        },
+        {
+            "assertion": "window is visible",
             "expected": None,
             "observed": True,
             "passed": True,
@@ -673,6 +802,28 @@ def test_evidence_bundle_schema_rejects_invalid_oracle_shape(
     bundle["tests"][0]["oracle"] = oracle
 
     assert validate_schema(bundle, "evidence-bundle.v1.schema.json")
+
+
+def test_schema_allows_false_passed_for_independent_oracle_evaluation(
+    valid_test_bundle, valid_candidate, valid_permit
+):
+    oracle = valid_test_bundle["tests"][0]["oracle"]
+    oracle["observed"] = False
+    oracle["passed"] = False
+    bundle = {
+        "schema_version": "gawain.evidence-bundle.v1",
+        "run_id": "run-test-schema",
+        "candidate": valid_candidate,
+        "permit": valid_permit,
+        "environment": {},
+        "claims": [],
+        "traces": [],
+        "verdict": {},
+        **valid_test_bundle,
+    }
+
+    assert validate_schema(bundle, "evidence-bundle.v1.schema.json") == []
+    assert "oracle_result_failed" in codes(valid_test_bundle)
 
 
 def test_evidence_bundle_schema_requires_artifact_kind(
