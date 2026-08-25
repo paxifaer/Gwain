@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gawain.local/schemas/evidence-bundle.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "contract",
+    "candidate",
+    "permit",
+    "environment",
+    "artifacts",
+    "tests",
+    "claims",
+    "traces",
+    "verdict"
+  ],
+  "properties": {
+    "schema_version": {"const": "gawain.evidence-bundle.v1"},
+    "run_id": {"type": "string", "pattern": "^run-[A-Za-z0-9._-]+$"},
+    "contract": {"type": "object"},
+    "candidate": {"type": "object"},
+    "permit": {"type": "object"},
+    "environment": {"type": "object"},
+    "artifacts": {"type": "array"},
+    "tests": {"type": "array"},
+    "claims": {"type": "array"},
+    "traces": {"type": "array"},
+    "verdict": {"type": "object"},
+    "waivers": {"type": "array"},
+    "human_acceptance": {"type": "object"}
+  }
+}
