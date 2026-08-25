@@ -15,6 +15,7 @@ from .issues import ValidationIssue, issue
 
 SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 HASH_CHUNK_BYTES = 1024 * 1024
+_OS_OPEN_SUPPORTS_DIR_FD = os.open in getattr(os, "supports_dir_fd", ())
 
 
 def resolve_artifact(
@@ -110,6 +111,20 @@ class _ArtifactNotRegularError(Exception):
     pass
 
 
+class _ArtifactChangedDuringReadError(Exception):
+    pass
+
+
+def _descriptor_traversal_supported() -> bool:
+    required_flags = (
+        getattr(os, "O_NOFOLLOW", 0),
+        getattr(os, "O_DIRECTORY", 0),
+        getattr(os, "O_CLOEXEC", 0),
+        getattr(os, "O_NONBLOCK", 0),
+    )
+    return all(required_flags) and _OS_OPEN_SUPPORTS_DIR_FD
+
+
 @contextmanager
 def _bundle_root_descriptor(root: Path) -> Iterator[int | None]:
     if not isinstance(root, Path):
@@ -119,9 +134,9 @@ def _bundle_root_descriptor(root: Path) -> Iterator[int | None]:
         resolved_root = root.resolve(strict=True)
         flags = (
             os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
+            | os.O_DIRECTORY
+            | os.O_CLOEXEC
+            | os.O_NOFOLLOW
         )
         descriptor = os.open(resolved_root, flags)
     except (OSError, RuntimeError):
@@ -142,9 +157,9 @@ def _hash_file(root_descriptor: int, relative: PurePosixPath) -> tuple[int, str]
     try:
         directory_flags = (
             os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
+            | os.O_DIRECTORY
+            | os.O_CLOEXEC
+            | os.O_NOFOLLOW
         )
         for part in relative.parts[:-1]:
             next_descriptor = os.open(
@@ -157,18 +172,33 @@ def _hash_file(root_descriptor: int, relative: PurePosixPath) -> tuple[int, str]
 
         file_flags = (
             os.O_RDONLY
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
+            | os.O_CLOEXEC
+            | os.O_NOFOLLOW
+            | os.O_NONBLOCK
         )
         file_descriptor = os.open(
             relative.parts[-1], file_flags, dir_fd=directory_descriptor
         )
-        if not stat.S_ISREG(os.fstat(file_descriptor).st_mode):
+        stat_before = os.fstat(file_descriptor)
+        if not stat.S_ISREG(stat_before.st_mode):
             raise _ArtifactNotRegularError
 
         while chunk := os.read(file_descriptor, HASH_CHUNK_BYTES):
             byte_count += len(chunk)
             digest.update(chunk)
+        stat_after = os.fstat(file_descriptor)
+        stable_fields = (
+            "st_dev",
+            "st_ino",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+        if any(
+            getattr(stat_before, field) != getattr(stat_after, field)
+            for field in stable_fields
+        ):
+            raise _ArtifactChangedDuringReadError
     finally:
         if file_descriptor >= 0:
             os.close(file_descriptor)
@@ -178,7 +208,9 @@ def _hash_file(root_descriptor: int, relative: PurePosixPath) -> tuple[int, str]
 
 
 def _evidence_issues(
-    bundle: Mapping[object, object], known_ids: set[str]
+    bundle: Mapping[object, object],
+    declared_ids: set[str],
+    verified_ids: set[str],
 ) -> list[ValidationIssue]:
     problems: list[ValidationIssue] = []
 
@@ -197,7 +229,9 @@ def _evidence_issues(
             )
             return
         for index, reference in enumerate(evidence):
-            if reference not in known_ids:
+            if reference in verified_ids:
+                continue
+            if reference not in declared_ids:
                 problems.append(
                     issue(
                         "unknown_evidence_ref",
@@ -258,8 +292,16 @@ def validate_artifacts(bundle: object, root: Path) -> list[ValidationIssue]:
             issue("invalid_artifacts", "artifacts", "artifacts must be a list")
         ]
 
+    platform_supported = _descriptor_traversal_supported()
+    if not platform_supported:
+        return _validate_artifact_records(
+            bundle, root, artifacts, None, platform_supported=False
+        )
+
     with _bundle_root_descriptor(root) as root_descriptor:
-        return _validate_artifact_records(bundle, root, artifacts, root_descriptor)
+        return _validate_artifact_records(
+            bundle, root, artifacts, root_descriptor, platform_supported=True
+        )
 
 
 def _validate_artifact_records(
@@ -267,6 +309,8 @@ def _validate_artifact_records(
     root: Path,
     artifacts: list[object],
     root_descriptor: int | None,
+    *,
+    platform_supported: bool,
 ) -> list[ValidationIssue]:
     problems: list[ValidationIssue] = []
     id_counts = Counter(
@@ -276,7 +320,8 @@ def _validate_artifact_records(
         and isinstance(record.get("artifact_id"), str)
         and bool(record.get("artifact_id"))
     )
-    known_ids: set[str] = set()
+    declared_ids = set(id_counts)
+    verified_ids: set[str] = set()
 
     for index, record in enumerate(artifacts):
         location = f"artifacts[{index}]"
@@ -340,6 +385,8 @@ def _validate_artifact_records(
                 )
             )
 
+        # The resolved Path is diagnostic only. Trusted reads use the opened
+        # root and component descriptors below, never this pathname.
         resolved, path_problem = resolve_artifact(root, path_value)
         if path_problem is not None:
             problems.append(_relocate(path_problem, f"{location}.path"))
@@ -355,7 +402,15 @@ def _validate_artifact_records(
         if not structurally_valid:
             continue
 
-        known_ids.add(artifact_id)
+        if not platform_supported:
+            problems.append(
+                issue(
+                    "artifact_platform_unsupported",
+                    f"{location}.path",
+                    "safe descriptor-relative artifact reads are unsupported",
+                )
+            )
+            continue
         if root_descriptor is None:
             problems.append(
                 issue(
@@ -364,7 +419,6 @@ def _validate_artifact_records(
                     "artifact root could not be opened safely",
                 )
             )
-            known_ids.discard(artifact_id)
             continue
         try:
             actual_bytes, actual_digest = _hash_file(
@@ -378,7 +432,24 @@ def _validate_artifact_records(
                     "artifact must be a regular file",
                 )
             )
-            known_ids.discard(artifact_id)
+            continue
+        except _ArtifactChangedDuringReadError:
+            problems.append(
+                issue(
+                    "artifact_changed_during_read",
+                    f"{location}.path",
+                    "artifact changed while it was being read",
+                )
+            )
+            continue
+        except NotImplementedError:
+            problems.append(
+                issue(
+                    "artifact_platform_unsupported",
+                    f"{location}.path",
+                    "safe descriptor-relative artifact reads are unsupported",
+                )
+            )
             continue
         except OSError:
             problems.append(
@@ -388,7 +459,6 @@ def _validate_artifact_records(
                     "artifact could not be opened safely",
                 )
             )
-            known_ids.discard(artifact_id)
             continue
         if actual_bytes != expected_bytes:
             problems.append(
@@ -406,6 +476,8 @@ def _validate_artifact_records(
                     "artifact digest does not match manifest",
                 )
             )
+        if actual_bytes == expected_bytes and actual_digest == expected_digest:
+            verified_ids.add(artifact_id)
 
-    problems.extend(_evidence_issues(bundle, known_ids))
+    problems.extend(_evidence_issues(bundle, declared_ids, verified_ids))
     return sorted(problems)

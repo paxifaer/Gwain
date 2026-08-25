@@ -1,4 +1,7 @@
+import hashlib
 import os
+import signal
+import time
 from pathlib import Path
 
 import pytest
@@ -131,6 +134,196 @@ def test_parent_swap_at_final_open_cannot_redirect_validation_to_replacement(
     assert "artifact_digest_mismatch" in [problem.code for problem in issues]
 
 
+def test_multilevel_parent_swap_stays_attached_to_checked_hierarchy(
+    valid_artifact_bundle, tmp_path, monkeypatch
+):
+    original_artifact = tmp_path / "artifacts" / "evidence.json"
+    manifest_content = original_artifact.read_bytes()
+    nested_parent = tmp_path / "artifacts" / "first" / "second"
+    nested_parent.mkdir(parents=True)
+    artifact = nested_parent / "evidence.json"
+    original_artifact.replace(artifact)
+    artifact.write_bytes(b"x" * len(manifest_content))
+    valid_artifact_bundle["artifacts"][0]["path"] = (
+        "artifacts/first/second/evidence.json"
+    )
+    moved_parent = nested_parent.with_name("checked-second")
+    original_open = os.open
+    swapped = False
+
+    def swap_parent_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and dir_fd is not None and path == "evidence.json":
+            nested_parent.rename(moved_parent)
+            nested_parent.mkdir()
+            artifact.write_bytes(manifest_content)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(artifact_module.os, "open", swap_parent_then_open)
+
+    issues = validate_artifacts(valid_artifact_bundle, tmp_path)
+
+    assert swapped
+    assert "artifact_digest_mismatch" in [problem.code for problem in issues]
+
+
+def test_final_entry_changed_to_fifo_is_rejected_without_blocking(
+    valid_artifact_bundle, tmp_path, monkeypatch
+):
+    artifact = tmp_path / "artifacts" / "evidence.json"
+    original_open = os.open
+    swapped = False
+
+    def replace_with_fifo_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and dir_fd is not None and path == "evidence.json":
+            artifact.unlink()
+            os.mkfifo(artifact)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    def deadline_expired(signum, frame):
+        raise TimeoutError("final FIFO open blocked")
+
+    monkeypatch.setattr(artifact_module.os, "open", replace_with_fifo_then_open)
+    previous_handler = signal.signal(signal.SIGALRM, deadline_expired)
+    started = time.monotonic()
+    signal.alarm(2)
+    try:
+        issues = validate_artifacts(valid_artifact_bundle, tmp_path)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+    assert swapped
+    assert time.monotonic() - started < 2
+    assert "artifact_not_regular" in [problem.code for problem in issues]
+
+
+def test_missing_descriptor_capabilities_fail_closed(
+    valid_artifact_bundle, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        artifact_module,
+        "_descriptor_traversal_supported",
+        lambda: False,
+        raising=False,
+    )
+
+    assert "artifact_platform_unsupported" in issue_codes(
+        valid_artifact_bundle, tmp_path
+    )
+
+
+def test_unimplemented_descriptor_relative_open_fails_closed(
+    valid_artifact_bundle, tmp_path, monkeypatch
+):
+    original_open = os.open
+
+    def reject_dir_fd(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is not None:
+            raise NotImplementedError("dir_fd unavailable")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(artifact_module.os, "open", reject_dir_fd)
+
+    assert "artifact_platform_unsupported" in issue_codes(
+        valid_artifact_bundle, tmp_path
+    )
+
+
+def test_large_artifact_is_hashed_in_multiple_chunks(
+    valid_artifact_bundle, tmp_path, monkeypatch
+):
+    artifact = tmp_path / "artifacts" / "evidence.json"
+    content = b"a" * (artifact_module.HASH_CHUNK_BYTES + 37)
+    artifact.write_bytes(content)
+    valid_artifact_bundle["artifacts"][0]["bytes"] = len(content)
+    valid_artifact_bundle["artifacts"][0]["sha256"] = (
+        "sha256:" + hashlib.sha256(content).hexdigest()
+    )
+    original_read = os.read
+    read_calls = 0
+
+    def count_reads(descriptor, count):
+        nonlocal read_calls
+        chunk = original_read(descriptor, count)
+        if chunk:
+            read_calls += 1
+        return chunk
+
+    monkeypatch.setattr(artifact_module.os, "read", count_reads)
+
+    assert validate_artifacts(valid_artifact_bundle, tmp_path) == []
+    assert read_calls >= 2
+
+
+def test_same_size_change_during_chunked_hashing_is_rejected(
+    valid_artifact_bundle, tmp_path, monkeypatch
+):
+    artifact = tmp_path / "artifacts" / "evidence.json"
+    content = b"a" * (artifact_module.HASH_CHUNK_BYTES + 37)
+    artifact.write_bytes(content)
+    valid_artifact_bundle["artifacts"][0]["bytes"] = len(content)
+    valid_artifact_bundle["artifacts"][0]["sha256"] = (
+        "sha256:" + hashlib.sha256(content).hexdigest()
+    )
+    original_read = os.read
+    changed = False
+
+    def change_after_first_chunk(descriptor, count):
+        nonlocal changed
+        chunk = original_read(descriptor, count)
+        if chunk and not changed:
+            previous = artifact.stat()
+            artifact.write_bytes(b"b" * len(content))
+            os.utime(
+                artifact,
+                ns=(previous.st_atime_ns, previous.st_mtime_ns + 1_000_000_000),
+            )
+            changed = True
+        return chunk
+
+    monkeypatch.setattr(artifact_module.os, "read", change_after_first_chunk)
+
+    issues = validate_artifacts(valid_artifact_bundle, tmp_path)
+
+    assert changed
+    assert "artifact_changed_during_read" in [problem.code for problem in issues]
+
+
+def test_intermediate_open_failure_does_not_leak_descriptors(
+    valid_artifact_bundle, tmp_path, monkeypatch
+):
+    proc_fds = Path("/proc/self/fd")
+    if not proc_fds.is_dir():
+        pytest.skip("descriptor accounting requires procfs")
+    original_artifact = tmp_path / "artifacts" / "evidence.json"
+    nested_parent = tmp_path / "artifacts" / "first" / "second"
+    nested_parent.mkdir(parents=True)
+    artifact = nested_parent / "evidence.json"
+    original_artifact.replace(artifact)
+    valid_artifact_bundle["artifacts"][0]["path"] = (
+        "artifacts/first/second/evidence.json"
+    )
+    original_open = os.open
+
+    def fail_second_parent(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is not None and path == "second":
+            raise OSError("injected intermediate open failure")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(artifact_module.os, "open", fail_second_parent)
+    before = len(list(proc_fds.iterdir()))
+
+    issues = validate_artifacts(valid_artifact_bundle, tmp_path)
+
+    after = len(list(proc_fds.iterdir()))
+    assert "artifact_path_escape" in [problem.code for problem in issues]
+    assert after == before
+
+
 def test_directory_artifact_is_rejected(valid_artifact_bundle, tmp_path):
     artifact = tmp_path / "artifacts" / "evidence.json"
     artifact.unlink()
@@ -153,6 +346,30 @@ def test_duplicate_artifact_id_is_rejected(valid_artifact_bundle, tmp_path, clon
     )
 
     assert "duplicate_artifact_id" in issue_codes(valid_artifact_bundle, tmp_path)
+
+
+def test_invalid_declared_artifact_does_not_add_unknown_evidence_diagnostic(
+    valid_artifact_bundle, tmp_path
+):
+    valid_artifact_bundle["artifacts"][0]["bytes"] = -1
+
+    codes = issue_codes(valid_artifact_bundle, tmp_path)
+
+    assert "invalid_artifact_bytes" in codes
+    assert "unknown_evidence_ref" not in codes
+
+
+def test_duplicate_declared_artifact_does_not_add_unknown_evidence_diagnostic(
+    valid_artifact_bundle, tmp_path, cloned
+):
+    valid_artifact_bundle["artifacts"].append(
+        cloned(valid_artifact_bundle["artifacts"][0])
+    )
+
+    codes = issue_codes(valid_artifact_bundle, tmp_path)
+
+    assert "duplicate_artifact_id" in codes
+    assert "unknown_evidence_ref" not in codes
 
 
 @pytest.mark.parametrize("artifact_id", [None, "", 7, [], True])
