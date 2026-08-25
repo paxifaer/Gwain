@@ -5,6 +5,7 @@ from itertools import repeat
 
 import pytest
 
+import gawain_verification.schema as schema_module
 from gawain_verification.issues import ValidationIssue, issue
 from gawain_verification.schema import validate_schema
 
@@ -911,3 +912,224 @@ def test_runtime_rejects_oracle_global_node_budget(valid_verdict_bundle):
     valid_verdict_bundle["verdict"]["status"] = "INCONCLUSIVE"
 
     assert "test_gate_failed" in codes(valid_verdict_bundle)
+
+
+def schema_depth_value(absolute_leaf_depth):
+    value = True
+    for _ in range(absolute_leaf_depth - 2):
+        value = [value]
+    return {"value": value}
+
+
+def json_value_node_count(value):
+    count = 0
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        count += 1
+        if type(current) is list:
+            stack.extend(current)
+        elif type(current) is dict:
+            stack.extend(current.values())
+    return count
+
+
+class SchemaStringSubclass(str):
+    pass
+
+
+def test_schema_resource_preflight_accepts_depth_64_and_rejects_65(
+    valid_verdict_bundle,
+):
+    valid_verdict_bundle["environment"] = schema_depth_value(64)
+    assert validate_schema(
+        valid_verdict_bundle, "evidence-bundle.v1.schema.json"
+    ) == []
+
+    valid_verdict_bundle["environment"] = schema_depth_value(65)
+    assert [
+        (problem.code, problem.location, problem.message)
+        for problem in validate_schema(
+            valid_verdict_bundle, "evidence-bundle.v1.schema.json"
+        )
+    ] == [
+        (
+            "schema_resource_limit",
+            "$",
+            "schema input exceeds safe resource limits",
+        )
+    ]
+
+
+def test_schema_resource_preflight_rejects_depth_500_without_recursion_error(
+    valid_verdict_bundle,
+):
+    valid_verdict_bundle["environment"] = schema_depth_value(500)
+
+    assert [problem.code for problem in validate_schema(
+        valid_verdict_bundle, "evidence-bundle.v1.schema.json"
+    )] == ["schema_resource_limit"]
+
+
+def test_schema_resource_preflight_rejects_cycles(valid_verdict_bundle):
+    cycle = []
+    cycle.append(cycle)
+    valid_verdict_bundle["environment"] = {"value": cycle}
+
+    assert [problem.code for problem in validate_schema(
+        valid_verdict_bundle, "evidence-bundle.v1.schema.json"
+    )] == ["schema_resource_limit"]
+
+
+def test_schema_resource_preflight_enforces_aggregate_node_boundary(
+    valid_verdict_bundle, monkeypatch
+):
+    node_count = json_value_node_count(valid_verdict_bundle)
+    monkeypatch.setattr(schema_module, "MAX_SCHEMA_NODES", node_count, raising=False)
+    assert validate_schema(
+        valid_verdict_bundle, "evidence-bundle.v1.schema.json"
+    ) == []
+
+    monkeypatch.setattr(schema_module, "MAX_SCHEMA_NODES", node_count - 1)
+    assert [problem.code for problem in validate_schema(
+        valid_verdict_bundle, "evidence-bundle.v1.schema.json"
+    )] == ["schema_resource_limit"]
+
+
+def test_schema_resource_preflight_enforces_container_width_boundary(
+    valid_verdict_bundle, monkeypatch
+):
+    monkeypatch.setattr(schema_module, "MAX_SCHEMA_WIDTH", 32, raising=False)
+    valid_verdict_bundle["environment"] = {
+        f"key_{index}": True for index in range(32)
+    }
+    assert validate_schema(
+        valid_verdict_bundle, "evidence-bundle.v1.schema.json"
+    ) == []
+
+    valid_verdict_bundle["environment"]["key_32"] = True
+    assert [problem.code for problem in validate_schema(
+        valid_verdict_bundle, "evidence-bundle.v1.schema.json"
+    )] == ["schema_resource_limit"]
+
+
+@pytest.mark.parametrize("target", ["value", "key"])
+def test_schema_resource_preflight_enforces_one_mib_text_boundary(
+    valid_verdict_bundle, target
+):
+    boundary = "x" * (1024 * 1024)
+    if target == "value":
+        valid_verdict_bundle["environment"] = {"value": boundary}
+    else:
+        valid_verdict_bundle["environment"] = {boundary: True}
+    assert validate_schema(
+        valid_verdict_bundle, "evidence-bundle.v1.schema.json"
+    ) == []
+
+    oversized = boundary + "x"
+    if target == "value":
+        valid_verdict_bundle["environment"] = {"value": oversized}
+    else:
+        valid_verdict_bundle["environment"] = {oversized: True}
+    assert [problem.code for problem in validate_schema(
+        valid_verdict_bundle, "evidence-bundle.v1.schema.json"
+    )] == ["schema_resource_limit"]
+
+
+@pytest.mark.parametrize(
+    "unsafe_value",
+    [
+        pytest.param(float("nan"), id="nonfinite"),
+        pytest.param(float("inf"), id="infinity"),
+        pytest.param((True,), id="tuple"),
+        pytest.param({1: True}, id="non-string-key"),
+        pytest.param(SchemaStringSubclass("text"), id="string-subclass"),
+    ],
+)
+def test_schema_resource_preflight_requires_exact_json_values(
+    valid_verdict_bundle, unsafe_value
+):
+    valid_verdict_bundle["environment"] = {"value": unsafe_value}
+
+    assert [problem.code for problem in validate_schema(
+        valid_verdict_bundle, "evidence-bundle.v1.schema.json"
+    )] == ["schema_resource_limit"]
+
+
+def test_schema_diagnostics_are_bounded_with_one_limit_marker(
+    valid_verdict_bundle,
+):
+    valid_verdict_bundle["claims"] = [{} for _ in range(300)]
+
+    found = validate_schema(
+        valid_verdict_bundle, "evidence-bundle.v1.schema.json"
+    )
+
+    assert len(found) == 256
+    assert [problem.code for problem in found].count("schema_issue_limit") == 1
+
+
+def test_schema_diagnostics_do_not_expose_invalid_values_or_keys(
+    valid_verdict_bundle,
+):
+    secret_key = "credential_like_key"
+    secret_value = "credential-value-" + "x" * 512
+    set_first_oracle(valid_verdict_bundle, {secret_key: secret_value})
+
+    found = validate_schema(
+        valid_verdict_bundle, "evidence-bundle.v1.schema.json"
+    )
+    rendered = repr(found)
+
+    assert found
+    assert secret_key not in rendered
+    assert secret_value not in rendered
+    assert schema_module._json_location([secret_key], frozenset()) == "$[<key>]"
+    assert all(
+        problem.message.startswith("schema validation failed (")
+        for problem in found
+        if problem.code == "schema_error"
+    )
+
+
+def test_schema_loading_value_error_is_fixed_and_fail_closed(
+    valid_verdict_bundle, monkeypatch
+):
+    def fail_loads(_text):
+        raise ValueError("credential-like parser detail")
+
+    monkeypatch.setattr(schema_module.json, "loads", fail_loads)
+
+    assert validate_schema(
+        valid_verdict_bundle, "evidence-bundle.v1.schema.json"
+    ) == [
+        ValidationIssue(
+            code="schema_resource_limit",
+            location="$",
+            message="schema input exceeds safe resource limits",
+        )
+    ]
+
+
+def test_jsonschema_exception_is_fixed_and_fail_closed(
+    valid_verdict_bundle, monkeypatch
+):
+    def fail_validation(_validator, _instance):
+        raise schema_module.SchemaError("credential-like schema detail")
+
+    monkeypatch.setattr(
+        schema_module.Draft202012Validator, "iter_errors", fail_validation
+    )
+
+    found = validate_schema(
+        valid_verdict_bundle, "evidence-bundle.v1.schema.json"
+    )
+
+    assert found == [
+        ValidationIssue(
+            code="schema_error",
+            location="$",
+            message="schema validation failed (internal)",
+        )
+    ]
+    assert "credential" not in repr(found)
