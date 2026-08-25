@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import re
+import unicodedata
 
 from .issues import ValidationIssue, issue
 
@@ -13,22 +15,40 @@ PEM_HEADERS = ("-----BEGIN PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----")
 MAX_DEPTH = 64
 MAX_NODES = 10_000
 MAX_WIDTH = 10_000
+MAX_LOCATION_LENGTH = 128
+_ZERO_WIDTH = frozenset({"\u180e", "\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"})
+_SEPARATORS = re.compile(r"[\s._\-‐‑‒–—―]+")
 
 
 def _key_name(value: object) -> str:
-    return value.strip().lower().replace("-", "_").replace(" ", "_") if isinstance(value, str) else ""
+    if not isinstance(value, str):
+        return ""
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    normalized = "".join(
+        character for character in normalized if character not in _ZERO_WIDTH
+    )
+    return _SEPARATORS.sub("_", normalized.strip())
 
 
 def _child_location(location: str, key: object) -> str:
-    if isinstance(key, int):
-        return f"{location}[{key}]"
-    return f"{location}.{key}" if isinstance(key, str) and key.isidentifier() else f"{location}[key]"
+    candidate = f"{location}[<key>]"
+    return candidate if len(candidate) <= MAX_LOCATION_LENGTH else "$[<nested>]"
+
+
+def _index_location(location: str, index: int) -> str:
+    candidate = f"{location}[{index}]"
+    return candidate if len(candidate) <= MAX_LOCATION_LENGTH else "$[<nested>]"
 
 
 def validate_no_secrets(value: object, location: str = "$") -> list[ValidationIssue]:
     """Inspect an arbitrary object without copying, recursion, or revealing values."""
     problems: list[ValidationIssue] = []
-    stack = [(value, location, 0)]
+    root_location = (
+        location
+        if isinstance(location, str) and len(location) <= MAX_LOCATION_LENGTH
+        else "$[<root>]"
+    )
+    stack = [(value, root_location, 0)]
     seen: set[int] = set()
     nodes = 0
     while stack:
@@ -61,7 +81,7 @@ def validate_no_secrets(value: object, location: str = "$") -> list[ValidationIs
                     problems.append(
                         issue(
                             "private_key_material",
-                            f"{current_location}[key]",
+                            _child_location(current_location, key),
                             "private key material is forbidden",
                         )
                     )
@@ -83,7 +103,7 @@ def validate_no_secrets(value: object, location: str = "$") -> list[ValidationIs
                 problems.append(issue("structure_limit", current_location, "structure exceeds width limit"))
                 continue
             for index in range(len(current) - 1, -1, -1):
-                stack.append((current[index], f"{current_location}[{index}]", depth + 1))
+                stack.append((current[index], _index_location(current_location, index), depth + 1))
                 if len(stack) > MAX_NODES:
                     problems.append(issue("structure_limit", current_location, "structure exceeds validation limits"))
                     stack.clear()

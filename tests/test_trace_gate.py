@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
+import gawain_verification.trace as trace_module
 from gawain_verification.schema import validate_schema
 from gawain_verification.secrets import validate_no_secrets
 from gawain_verification.trace import validate_trace_file
@@ -288,3 +289,188 @@ def test_deterministic_and_nonmutating(valid_trace_file, expected_trace_context)
     first = validate_trace_file(valid_trace_file, context)
     assert first == validate_trace_file(valid_trace_file, context)
     assert context == expected_trace_context
+
+
+def test_trace_file_byte_limit_boundary(
+    valid_trace_file, expected_trace_context, monkeypatch
+):
+    size = valid_trace_file.stat().st_size
+    monkeypatch.setattr(trace_module, "MAX_TRACE_BYTES", size)
+    assert validate_trace_file(valid_trace_file, expected_trace_context) == []
+    monkeypatch.setattr(trace_module, "MAX_TRACE_BYTES", size - 1)
+    assert codes(valid_trace_file, expected_trace_context) == ["trace_too_large"]
+
+
+def test_actual_bytes_are_counted_even_if_stat_changes(
+    valid_trace_file, expected_trace_context, monkeypatch
+):
+    actual_stat = Path.stat
+    monkeypatch.setattr(trace_module, "MAX_TRACE_BYTES", 32)
+
+    def stale_stat(path):
+        result = actual_stat(path)
+        return type("Stat", (), {"st_mode": result.st_mode, "st_size": 0})()
+
+    monkeypatch.setattr(Path, "stat", stale_stat)
+    assert codes(valid_trace_file, expected_trace_context) == ["trace_too_large"]
+
+
+def test_trace_line_byte_limit_boundary(
+    valid_trace_file, expected_trace_context, monkeypatch
+):
+    lines = valid_trace_file.read_bytes().splitlines(keepends=True)
+    longest = max(map(len, lines))
+    monkeypatch.setattr(trace_module, "MAX_LINE_BYTES", longest)
+    assert validate_trace_file(valid_trace_file, expected_trace_context) == []
+    monkeypatch.setattr(trace_module, "MAX_LINE_BYTES", longest - 1)
+    assert codes(valid_trace_file, expected_trace_context) == ["line_too_long"]
+
+
+def test_unterminated_overlong_line_stops_before_json(
+    tmp_path, expected_trace_context, monkeypatch
+):
+    monkeypatch.setattr(trace_module, "MAX_LINE_BYTES", 16)
+    path = tmp_path / "long.jsonl"
+    path.write_bytes(b"{" * 17)
+    assert codes(path, expected_trace_context) == ["line_too_long"]
+
+
+def test_event_and_span_admission_limits(
+    valid_trace_file, expected_trace_context, monkeypatch
+):
+    monkeypatch.setattr(trace_module, "MAX_EVENTS", 4)
+    monkeypatch.setattr(trace_module, "MAX_SPANS", 2)
+    assert validate_trace_file(valid_trace_file, expected_trace_context) == []
+    monkeypatch.setattr(trace_module, "MAX_EVENTS", 3)
+    assert codes(valid_trace_file, expected_trace_context) == ["event_limit"]
+    monkeypatch.setattr(trace_module, "MAX_EVENTS", 4)
+    monkeypatch.setattr(trace_module, "MAX_SPANS", 1)
+    assert codes(valid_trace_file, expected_trace_context) == ["span_limit"]
+
+
+def test_issue_output_is_capped_with_marker(tmp_path, expected_trace_context, monkeypatch):
+    monkeypatch.setattr(trace_module, "MAX_ISSUES", 4)
+    path = tmp_path / "many-bad.jsonl"
+    path.write_text("{bad}\n" * 20, encoding="utf-8")
+    issues = validate_trace_file(path, expected_trace_context)
+    assert len(issues) == 4
+    assert [problem.code for problem in issues].count("issue_limit") == 1
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["[" * 1100 + "]" * 1100, '{"sequence":' + "9" * 5000 + "}"],
+)
+def test_pathological_json_is_a_safe_per_line_issue(
+    tmp_path, expected_trace_context, raw
+):
+    path = tmp_path / "pathological.jsonl"
+    path.write_text(raw + "\n", encoding="utf-8")
+    issues = validate_trace_file(path, expected_trace_context)
+    assert issues
+    assert issues[0].code in {"invalid_json", "structure_limit"}
+    assert issues[0].location == "line 1"
+    assert "trace_file" not in [problem.code for problem in issues]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("event_kind", "credential-enum-value"),
+        ("schema_version", "credential-const-value"),
+        ("sequence", "credential-type-value"),
+        ("credential-additional-key", "credential-additional-value"),
+    ],
+)
+def test_schema_diagnostics_never_leak_untrusted_values_or_keys(
+    valid_trace_file, expected_trace_context, field, value
+):
+    mutate(valid_trace_file, lambda events: events[0].__setitem__(field, value))
+    issues = validate_trace_file(valid_trace_file, expected_trace_context)
+    rendered = repr(issues)
+    assert "schema_error" in [problem.code for problem in issues]
+    assert field not in rendered
+    assert str(value) not in rendered
+    assert all(len(problem.location) <= 128 and len(problem.message) <= 128 for problem in issues)
+
+
+def _span_event(template, sequence, span, parent, kind):
+    event = deepcopy(template)
+    event.update(
+        event_id=f"chain-{sequence}",
+        sequence=sequence,
+        span_id=span,
+        parent_span_id=parent,
+        event_kind=kind,
+        attributes={"status": "OK"} if kind == "SPAN_END" else {},
+    )
+    return event
+
+
+def test_long_parent_chain_and_cycle_have_bounded_cycle_output(
+    valid_trace_file, expected_trace_context, monkeypatch
+):
+    template = load_events(valid_trace_file)[0]
+    span_count = 300
+    spans = [f"{index:016x}" for index in range(1, span_count + 1)]
+    events = []
+    for index, span in enumerate(spans):
+        parent = None if index == 0 else spans[index - 1]
+        events.extend(
+            [
+                _span_event(template, index * 2 + 1, span, parent, "SPAN_START"),
+                _span_event(template, index * 2 + 2, span, parent, "SPAN_END"),
+            ]
+        )
+    write_events(valid_trace_file, events)
+    assert validate_trace_file(valid_trace_file, expected_trace_context) == []
+    for event in events[:2]:
+        event["parent_span_id"] = spans[-1]
+    write_events(valid_trace_file, events)
+    issues = validate_trace_file(valid_trace_file, expected_trace_context)
+    assert [problem.code for problem in issues].count("parent_cycle") == 1
+
+
+@pytest.mark.parametrize("position,code", [("before", "span_start_not_first"), ("after", "span_end_not_last")])
+def test_span_terminal_boundaries(
+    valid_trace_file, expected_trace_context, position, code
+):
+    events = load_events(valid_trace_file)
+    state = deepcopy(events[1])
+    state.update(event_id="state-extra", event_kind="STATE", attributes={"from_state": "A", "to_state": "B"})
+    insert_at = 1 if position == "before" else 3
+    events.insert(insert_at, state)
+    for sequence, event in enumerate(events, 1):
+        event["sequence"] = sequence
+    write_events(valid_trace_file, events)
+    assert code in codes(valid_trace_file, expected_trace_context)
+
+
+@pytest.mark.parametrize("field", ["service", "instance_id"])
+def test_span_service_and_instance_splice_is_rejected(
+    valid_trace_file, expected_trace_context, field
+):
+    events = load_events(valid_trace_file)
+    events[2][field] = "spliced-identity"
+    write_events(valid_trace_file, events)
+    assert "inconsistent_span_identity" in codes(valid_trace_file, expected_trace_context)
+
+
+@pytest.mark.parametrize("key", ["ｔｏｋｅｎ", "to\u200bken", "api.key"])
+def test_unicode_zero_width_and_dot_sensitive_keys_are_blocked_without_leak(key):
+    issues = validate_no_secrets({"nested": {key: "credential-value"}})
+    assert [problem.code for problem in issues] == ["secret_key"]
+    assert key not in repr(issues)
+    assert "credential-value" not in repr(issues)
+
+
+def test_deep_secret_diagnostic_locations_are_bounded():
+    value = current = {}
+    for _ in range(64):
+        child = {}
+        current["ordinary"] = child
+        current = child
+    current["token"] = "credential-value"
+    issues = validate_no_secrets(value)
+    assert any(problem.code == "secret_key" for problem in issues)
+    assert all(len(problem.location) <= 128 for problem in issues)
