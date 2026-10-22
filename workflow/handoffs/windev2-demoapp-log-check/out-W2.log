@@ -1,0 +1,72 @@
+## W2 最终报告 — windev2 → SP000065:50053 mTLS 失败
+
+### 1. windev2 Tauri 进程状态
+PID 28188 `SudoRobot.exe`(StartTime 8/18 16:50:35）与 W1 完全相同，**未重启**。父进程链：`WindowsTerminal → powershell.exe → just.exe → powershell.exe → bun.exe(x4) → cargo.exe → cargo.exe (rustc-spawned) → SudoRobot.exe`。用户通过 `just dev-tauri-demo` 启动。
+
+### 2. app-data dir 最新 mtime
+```
+robot-config.json    2 B   8/18/2026 5:06:28 PM   ← 从 W1 的 289 B 被清空
+demo-tts-debug.log   21 KB 8/18/2026 4:32:46 PM   ← 无新行
+taskflow-debug.log   3.7 MB 8/18/2026 4:32:35 PM  ← 无新行
+```
+
+### 3. `robot-config.json` 当前内容（VERBATIM)
+```json
+[]
+```
+整个文件就是两个字符 `[]`,**17:06:28** 那次写入把 W1 的对象快照覆盖为空数组。
+
+### 4. windev2 → SP000065 fresh re-test
+- `Test-NetConnection 192.168.110.65:50053` → **True**
+- `Test-NetConnection 192.168.100.100:50053` → **False**(TCP refused)
+- `SslStream.AuthenticateAsClient('192.168.110.65')` → **TLS_OK subject=CN=argo-tls-node issuer=CN=argo-tls-root**（与 W1 一致）
+
+### 5. SP000065 server log 最新条目
+服务 16:40:00 启动后，**0 条 app 级日志**。journalctl --since "60 min ago" 只剩 systemd 一条 `Started Argo Gateway - Direct Connect Server.`。文件 mtime 锁死在 `8月 18 16:40:00.964`，最后一行是 `mDNS service registered ... addresses=192.168.110.65,192.168.100.100,... port=None`。**Grep 16:40 后任何 TLS/handshake/192.168.110.217/110.65 → 0 命中**。RUST_LOG=info，连接级日志默认不输出，但 mTLS accept/handshake 在 info 级也没有任何记录，与"客户端根本没碰到服务器"一致。
+
+### 6. SP000065 服务器 TLS 状态
+```
+/etc/argo-tls/  node.crt(新，8/18 16:39)  node.key  root.crt(8/14)
+node.crt  subject=CN=argo-tls-node, issuer=CN=argo-tls-root
+          notBefore=Aug 18 08:40:06 2026 GMT / notAfter=2027 GMT
+          sha1=26:53:5C:3E:8A:4D:97:48:99:BB:05:2C:84:2A:57:48:29:D0:D6:B8
+node.crt  SAN: DNS:SP000065,DNS:localhost,IP:127.0.0.1,IP:192.168.100.100,
+               IP:192.168.110.65,IP:172.17.0.1,IP:172.18.0.1,IPv6...
+node.crt  EKU = TLS Web Server Authentication
+root.crt  sha1=FA:25:B2:7A:F8:DA:1F:40:F5:77:F9:48:F7:20:25:4C:68:84:ED:34
+env:      GATEWAY_TLS_ENABLE=1, GATEWAY_TLS_PORT=50053,
+          GATEWAY_TLS_ROOT_CA_PATH=/etc/argo-tls/root.crt, RUST_LOG=info
+ss -tlnp: LISTEN 0.0.0.0:50053 (argogateway-server,UID=root；50051 未在 LISTEN)
+systemd:  active (running) since 16:40:00 CST；今天 12:45 曾 13 次 exit=1 崩溃循环。
+```
+**关键**:windev2 `~/.argo-tls/ca.crt` + `target/debug/root.crt` + `target/debug/resources/root.crt` 文件 SHA1 全部 = `2c7a91d4...038a0`,**与 SP000065 root.crt 服务器文件字节一致**。CA 双边匹配。
+
+### 7. windev2 端口/SAN sanity
+`resolveGatewayBaseUrlFromRobotIp("192.168.110.65:50053")` → 升 https → `https://192.168.110.65:50053`。`transport.ts::isMtlsEndpointUrl` 判定 https + 50053 + RFC1918 → TRUE → 走 `gateway_mtls_proxy`。`parse_allowed_gateway_url` 服务器侧也通过。**URL 链路没错**。
+
+**金标对照**：把 windev2 的 `ca.crt+client.crt+client.key` 拷到本 Linux 工位，直接 `cargo new` 一个 reqwest 0.11.27 + rustls 探针：identity OK,CA OK,client build OK,`GET https://192.168.110.65:50053/` → **HTTP_OK 200**。同一组证书、同一 reqwest 版本，在我这边打得通。
+
+**决定性的客户端代码缺陷**(`apps/demo/src-tauri/src/argo_tls.rs` line 66-74):
+```rust
+pub fn client_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var(CLIENT_DIR_ENV) { ... }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".argo-tls")
+}
+```
+**Windows 下 $env:HOME 不会自动设置**（我查了 HKCU\Environment 和 HKLM\...\Session Manager\Environment,HOME 键都不存在；SSH 会话里有 HOME 是 sshd 自己注的）。`cargo run` 从 `just.exe → bun.exe` 链路上继承的 env 里没有 HOME。代码回退到 `.` → 相对 SudoRobot.exe 的 CWD（多半 `apps/demo/src-tauri/` 或仓库根），而这些目录下 **`.argo-tls/` 都不存在**(Test-Path 全 False)。`apply_mtls` 立即 Err `mTLS client cert missing (client.crt + client.key).`,AppError 序列化为 `{name:"RequestFailed",message:"..."}` 抛回 JS,`robot-sdk.ts` 的 `String(error)` 把它打成 `[object Object]`。
+
+### 8. 结论 — 分支 (a) 客户端侧失败
+**铁证**：服务器日志自 16:40 起 0 条 TLS/连接条目；ClientHello 根本没到 SP000065。reqwest+rustls 离线探针用同一组证书成功完成握手+HTTP 200,**所以证书、密钥、网络、服务器都健康**——是 windev2 上 SudoRobot 进程**因为 HOME 缺失而读不到 `client.crt/client.key` 或 `ca.crt`**，请求在身份装载阶段就返回 Err，从未到达 TCP。
+
+建议（给 orchestrator 决策，worker 不改代码）：在启动 `just dev-tauri-demo` 前为进程注入 `ARGO_TLS_CLIENT_DIR=C:\Users\jack\.argo-tls` 或 `HOME=C:\Users\jack`，或在 `client_dir()` 加 `USERPROFILE` / `dirs::home_dir()` 兜底。同时 `robot-sdk.ts` 的 `String(error)` 应该改成 `(error as any)?.message ?? String(error)`，否则 AppError 的 `message` 永远显示不出。
+
+### 9. ESCALATEs
+1. **HOME 未直接观测到**：未在 PID 28188 PEB 里直接读环境变量（需要管理员权限），结论由 HKCU/HKLM 注册表 + PowerShell 默认行为 + W1 起 `app-data` 无 TLS 报错日志，三方互证。若用户 PS profile（我们查过 `$PROFILE.*` 全空）以外的机制（如 scoop、企业 GPO）注了 HOME，此结论需复核。
+2. **`robot-config.json` 17:06 被改写为 `[]`**：看起来像用户交互清理或 `writeRobotConfig([])` 写空，但当前代码路径未找到谁在这个时刻写空；次要，不影响主线。
+3. **`ss -tlnp` 未显示 50053 归属 PID**(niic_26 用户权限看不到 root 进程），但启动日志明确写了 `Connect/gRPC server listening (mTLS 1.3) addr=0.0.0.0:50053`，归属 argogateway-server 无疑。
+4. **服务器当天 12:45-12:46 有 13 次 exit=1 崩溃循环**，目前已稳定；是否影响尚存接线未知，但本轮诊断在稳定期进行。
+
+**Files written/modified**: none（本地 Linux `/tmp/reqwest-probe/` + `/tmp/windev2-{ca,client}.{crt,key}` 探针产物已在收尾清理；windev2、SP000065 无任何写入）。
+
+Elapsed: 12min05s

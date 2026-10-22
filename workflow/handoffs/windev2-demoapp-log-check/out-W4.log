@@ -1,0 +1,96 @@
+## W4 最终报告 — 实施 W3 P0 方案：TLS log + JS String(error) bug 修复
+
+### 1. 改动文件清单
+
+| 文件 | 改动行号 | 摘要 |
+|---|---|---|
+| `apps/demo/src-tauri/src/error.rs` | 12-17 + 53-66 | `RequestFailed` 加 `cause: Option<String>`；新增 `request_failed_with_cause` helper |
+| `apps/demo/src-tauri/src/argo_tls.rs` | 16-46 + 74-92 + 118-152 + 158-175 + 181-216 + 274-318 + 324-345 + 383-418 + 480-495 + 549-573 + 601-616 + 693-718 | 加 `tls_log` helper；所有决策点埋点；4 处 AppError 出口升级为 `request_failed_with_cause` |
+| `packages/gateway-client/src/lib/transport.ts` | 9-28 + 318-322 + 380-386 | 顶部 export `extractInvokeErrorMessage`;line 302 streaming 分支、line 362 unary 分支修复 |
+| `apps/demo/src/services/robot-sdk.ts` | 32-50 + 154 | 文件内私有 helper（不同名冲突）;line 136 `String(error)` 修复 |
+| `apps/demo/src/routes/manage-robot.tsx` | 46-65 + 267/391/523/652 | 文件内私有 helper;4 处 `String(error)` 修复 |
+
+### 2. `argo_tls.rs` log 覆盖
+
+**`tls_log` 位于 `argo_tls.rs:16-46`**（完整函数体）:
+
+```rust
+fn tls_log(msg: impl AsRef<str>) {
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else { return };
+    let dir = std::path::PathBuf::from(home).join(".argo-tls");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("argo-tls-debug.log");
+    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else { return };
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let _ = writeln!(f, "[t={ts}] {}", msg.as_ref());
+}
+```
+
+**决策点埋点清单**（事件名/期望输出）:
+
+- `root_cert_resource_path:74-92` — `resource_dir_err=`/每候选 `candidate=<p> hit=<bool>`/miss 时 `no_candidate_hit`
+- `load_client_identity:118-152` — `crt_read_err/key_read_err/cert_pem_parse_err/certs_empty/key_missing_in_pem/key_parse_err/ok certs=<n>`
+- `client_identity_pem:158-175` — `crt_read_err/key_read_err`
+- `client_ca_cert_pem:181-216` — `hit=ca_crt bytes=<n>` / `miss=ca_crt err=` / `no_app_handle cannot_fallback_to_root_crt` / `no_root_cert_resource` / `hit=root_crt bytes=<n>` / `read_root_crt_err`
+- `apply_mtls:274-318` — `use_tls=false` skip / `step=check_client_identity err=missing` / `step=read_identity_pem err=unreadable_after_cert_detected` / `step=identity_from_pem err={e:?}` / `step=ca_from_pem err={e:?}` / `ok ca_loaded bytes=<n>` / `ca_missing rely_on_system_trust`
+- `build_http_client:324-345` — `ok use_tls=` / `build_err use_tls= err={e:?}`
+- `parse_allowed_gateway_url:480-495` — `parse_err raw=` / `reject_scheme scheme=` / `reject_no_host` / `reject_host host=` / `reject_port got= want=` / `ok url=`
+- `gateway_mtls_proxy:549-573` — `entry method= url=` / `send_err is_connect= is_request= is_timeout= is_redirect= err={e:?}` / `body_read_err` / `ok status=<n>`
+- `forward_mtls_stream:601-616` — `entry method= url=` / `send_err is_connect=... err={e:?}`
+- `gateway_mtls_proxy_stream:693-718` — `entry` / `reject err=` / `task_err err={e:?}`
+
+### 3. `error.rs` cause 字段
+
+```rust
+#[error("Request failed: {message}")]
+RequestFailed {
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<String>,
+},
+```
+`request_failed` 保留旧行为（`cause: None`)；新增 `request_failed_with_cause(msg, cause)` → `cause: Some(...)`。
+
+`argo_tls.rs` 4 个 AppError 出口全部升级：line 158(`identity_from_pem`)、line 163(`ca_from_pem`)、line 320(`reqwest send`)、line 337(`body read`)、line 407(stream send）均改为 `request_failed_with_cause(..., format!("{e:?}"))`,Debug 链永久保留。
+
+### 4. JS helper + 5 处 bug 修复
+
+未单独建 `extract-error.ts`；在 `transport.ts:9-28` 顶部 `export function extractInvokeErrorMessage`(5 处见 §1)；在 `robot-sdk.ts:32-50` 与 `manage-robot.tsx:46-65` 各加同名**私有** helper（不 re-export 避免跨包串）。
+
+```ts
+export function extractInvokeErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object") {
+    const obj = error as { message?: unknown; name?: unknown };
+    if (typeof obj.message === "string" && obj.message.length > 0) return obj.message;
+    if (typeof obj.name === "string" && obj.name.length > 0) return `${obj.name}: ${JSON.stringify(error)}`;
+    return JSON.stringify(error);
+  }
+  return String(error);
+}
+```
+
+- `transport.ts:302` `new Error(String(err))` → `new Error(extractInvokeErrorMessage(err))`
+- `transport.ts:362` unary `invoke<MtlsProxyResponse>(...)` 外层 try/catch,catch 中 `throw new Error(extractInvokeErrorMessage(e))`
+- `robot-sdk.ts:136` `error instanceof Error ? … : String(error)` → `extractInvokeErrorMessage(error)`
+- `manage-robot.tsx:267/391/523/652` 同上替换（523 的 `setTlsFailDialog` 现显示真实 message 而非 `[object Object]`)
+
+### 5. cargo check 结果
+
+```
+cargo check -p SudoRobot --manifest-path apps/demo/src-tauri/Cargo.toml
+```
+用时 **2.55s**。**0 错误**。仅 6 条 warning，全部位于未改动的 `skyline_launcher.rs` / `lib.rs`（未使用 import/var)，与本次改动无关。
+
+### 6. ESCALATEs
+
+1. `manage-robot.tsx:223` `删除机器人失败` toast 处也存在相同 `String(error)` 模式，不在 SPEC/PROMPT 声明的 4 处范围内，且 prompt 明确"不要改其他无关 catch 块"，本次未动。若需修，同一 helper 一行替换。
+2. `gateway_mtls_proxy_stream reject` 分支沿用现有 `format!("...: {e}")`,`e` 是 `String`（来自 `parse_allowed_gateway_url`）非 `Error`，未升级为 `with_cause`;`tls_log` 已记录同内容，如需格式对齐可后续统一。
+3. W3 ESCALATE #1(`windows_subsystem` 下 stderr 是否仍丢）未验证 — 本次 `tls_log` 写文件与 stderr 无关，不受影响。
+4. 未跑 `cargo build`/`cargo test`/`just dev`/任何 JS test — 按用户指示"尽量少测试，我这边来测"。
+
+HEAD-guard（任务开始时）:`d95dc0c Merge branch 'main' of git.sudoai.cc:Parsifal/Gawain`,status `?? ../`。未执行任何 git 写操作。
+
+Elapsed: 6min42s

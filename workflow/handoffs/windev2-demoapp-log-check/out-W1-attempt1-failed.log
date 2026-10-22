@@ -1,0 +1,32 @@
+SSH 被权限系统全面拦截 — 该 worker 以非交互方式运行，无法触发用户审批，所有需要 SSH 的检查均无法执行。不存在可绕过的替代通道（SPEC 明确指定 SSH 为唯一访问路径）。
+
+End time taken: ~30s. No files created or modified.
+
+---
+
+**W1 最终报告 — windev2 demoapp run-log inspection（全部 ESCALATE)**
+
+1. **Tauri 进程** — ESCALATE（数据不可得）。原因：`ssh windows_dev_2 ...` 被本地 Claude Code 权限系统以 "This command requires approval" 拒绝；本 worker 按 bootstrap.md 第 3 条以非交互方式运行，无人可审批，故无法获取 PID / Path / StartTime / debug-release 判定。
+
+2. **Tauri app-data dir 列表** — ESCALATE（数据不可得）。同上，`C:\Users\jack\AppData\Roaming\com.sudo-robot.sudorobot\` 内容未读到。
+
+3. **Tauri log 末尾摘抄** — ESCALATE（数据不可得）。因 (2) 失败，`*.log` 文件清单都拿不到，TLS/handshake/cert/50053 关键字摘抄无从进行。
+
+4. **`~/.argo-tls/` 文件清单 + SHA1 + cert metadata** — ESCALATE（数据不可得）。ca.crt / client.crt / client.key 的存在性、SHA1、Subject/Issuer/NotBefore/NotAfter/Thumbprint 均未读取到。**这是 SPEC 标注的"最可能 bug 点"(mTLS client cert 缺失），必须由有能力执行 SSH 的角色补上。**
+
+5. **windev2 → SP000065 连通性** — ESCALATE（数据不可得）。`Test-NetConnection 192.168.110.65:50053` 和 `192.168.100.100:50053` 均未执行；`SslStream.AuthenticateAsClient` 这一关键"证明 windev2 OS 层 cert 链可用"的握手测试（base64 编码的 PS，同时带来 `iconv`+`base64` 两条子命令也一起被拦）同样未执行，因此无法判断当前失败是客户端代码路径还是网络/证书引发。
+
+6. **其他发现** — ESCALATE（数据不可得）。本地侧我只能确认 HEAD-guard 状态：本地仓库 HEAD `d95dc0c`，工作区无未提交修改；`D:\code\dang\robot-app-platform\` 远端 git 状态、stray log、`%TEMP%` 下 SudoRobot/argo 残留、`RUST_LOG` / `ARGO_TLS_CLIENT_DIR` / `ARGO_MTLS_PORT` / `ARGO_GATEWAY_HOSTS` 全部未读到。
+
+7. **ESCALATEs 汇总（全部同一根因）**
+   - **E-root**:`Bash` 的 permission gate 把每条 `ssh windows_dev_2 ...` 都判为 "requires approval";SPEC-1 给的执行路径只有这一条，且 worker 非交互运行，**A/B/C/D/E/F/G 七个检查全部因此阻塞**，无一可执行、无一可降级。
+   - **影响**：编排器目前拿不到任何一手情报来决定"加 tracing + 重建"还是"另谋他法"。
+   - **建议转交方式（任选其一）**:
+     a) 由人类在交互式 Claude 会话中重新跑本 prompt，允许 `Bash(ssh *)` 一次后即放手；
+     b) 在 `.claude/settings.json` 把 `Bash(ssh:*)` 加入 allow 列表后再让 worker 复跑；
+     c) 编排器改派给具备 SSH 权限的现有子 agent。
+   - **本节无 judgment call 自行决策**——严格遵守"No SSH ⇒ no fabrication"，未对 windev2 状态做任何猜测。
+
+**写入文件清单** — 无。本 worker 只读取了 `bootstrap.md` 与 `SPEC-1.md`，未创建/修改任何文件（write-set 契约遵守）。
+
+Elapsed： 0min30s

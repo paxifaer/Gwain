@@ -1,0 +1,58 @@
+## W15 完成报告
+
+### 1. 改动文件 + 行号
+
+`/home/wangdang/work/ai-stack/code/frontend/robot-app-platform/apps/skyline/src-tauri/permissions/default.toml` — 修改前 41 行 → 修改后 49 行（line 41-48 追加 8 行）。
+
+Diff 片段：
+```diff
+   "skyline_updater_install",
++  "tls_has_root_cert",
++  "tls_has_client_cert",
++  "gateway_mtls_proxy",
++  "runtime_log_append",
++  "runtime_log_read_tail",
++  "runtime_log_flush",
++  "runtime_log_cleanup",
++  "chatbot_agent_materialize_taskflow_template",
+ ]
+```
+
+### 2. 修改后 `commands.allow` 末尾 10 行
+
+```
+40	  "skyline_updater_install",
+41	  "tls_has_root_cert",
+42	  "tls_has_client_cert",
+43	  "gateway_mtls_proxy",
+44	  "runtime_log_append",
+45	  "runtime_log_read_tail",
+46	  "runtime_log_flush",
+47	  "runtime_log_cleanup",
+48	  "chatbot_agent_materialize_taskflow_template",
+49	]
+```
+
+### 3. TOML 语法验证
+
+`tomllib.load` 0 异常，`commands.allow` 总数 = 42 (34+8) ✓；`tls_has_root_cert` / `chatbot_agent_materialize_taskflow_template` 均在列表中 ✓。
+
+### 4. scp 同步验证
+
+- windev2 `default.toml` LastWriteTime = `Tuesday, August 18, 2026 8:40:41 PM`（已更新）✓
+- grep `tls_has_root_cert` / `gateway_mtls_proxy` / `runtime_log_append` 命中数 = **3** ✓
+
+### 5. stale acl-manifests.json 删除验证
+
+- Linux 侧：`ls` 报"没有那个文件或目录" → 已删除 ✓
+- windev2 侧：`Test-Path` 返回 `False` → 已删除 ✓
+
+下次 `tauri-build` 触发时会基于新 `default.toml` 重新生成 `acl-manifests.json`，8 个新命令将进入 ACL allow list。
+
+### 6. ESCALATEs
+
+无。
+
+注：首次 ssh grep 因 Bash→ssh→cmd→PowerShell 多层引号导致 `|` 被 cmd 当成管道符报错；改用 PowerShell `Select-String` 数组 pattern 形式（每个 pattern 独立参数）后成功。不影响最终结果。
+
+Elapsed: 1min30s

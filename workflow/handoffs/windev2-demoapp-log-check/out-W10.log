@@ -1,0 +1,108 @@
+## W10 最终报告 — skyline studio P0 复制：W4 tls_log + W5 client_dir USERPROFILE
+
+### 1. 改动文件 + 行号
+
+**唯一改动文件**:`/home/wangdang/work/ai-stack/code/frontend/robot-app-platform/apps/skyline/src-tauri/src/argo_tls.rs` (574 → 681 行）
+
+| 函数 | 改动前 | 改动后 | 摘要 |
+|---|---|---|---|
+| `tls_log` | 不存在 | 8-34 | 新增，demo W4 完整复制 |
+| `root_cert_resource_path` | 13-22 | 41-66 | +4 处埋点 |
+| `client_dir` | 59-67 | 102-116 | USERPROFILE 兜底 + tls_log |
+| `load_client_identity` | 73-90 | 121-178 | +7 处埋点 |
+| `client_identity_pem` | 93-99 | 181-207 | +2 处埋点 |
+| `client_ca_cert_pem` | 106-114 | 212-252 | +6 处埋点 |
+| `apply_mtls` | 132-158 | 269-306 | +7 处埋点 |
+| `build_http_client` | 165-173 | 313-329 | +2 处埋点 |
+| `parse_allowed_gateway_url` | 266-279 | 423-456 | +6 处埋点 |
+| `gateway_mtls_proxy` | 289-333 | 461-520 | +4 处埋点 |
+
+`PathBuf` 已 line 1 import，无需新增。
+
+### 2. `tls_log` 函数完整 body （位于 argo_tls.rs:8-34)
+
+```rust
+fn tls_log(msg: impl AsRef<str>) {
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let Some(home) =
+        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+    else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(home).join(".argo-tls");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("argo-tls-debug.log");
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let _ = writeln!(f, "[t={ts}] {}", msg.as_ref());
+}
+```
+与 demo W4 §2 VERBATIM 一致。
+
+### 3. `client_dir()` 修改 diff
+
+**Before** （旧 line 65-66):
+```rust
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".argo-tls")
+}
+```
+
+**After** （新 line 108-115):
+```rust
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let dir = home.join(".argo-tls");
+    tls_log(format!("client_dir resolved dir={}", dir.display()));
+    dir
+}
+```
+
+### 4. 决策点埋点清单
+
+按函数列事件名（对照 demo W4 §2 命名）:
+
+- `root_cert_resource_path` (41-66):`resource_dir_err=`,`candidate=<p> hit=<bool>` × 2,`no_candidate_hit`
+- `client_dir` (102-116):`client_dir resolved dir=`
+- `load_client_identity` (121-178):`crt_read_err=`,`key_read_err=`,`cert_pem_parse_err=`,`certs_empty`,`key_missing_in_pem`,`key_parse_err=`,`ok certs=<n>`
+- `client_identity_pem` (181-207):`crt_read_err=`,`key_read_err=`
+- `client_ca_cert_pem` (212-252):`hit=ca_crt bytes=<n>`,`miss=ca_crt err=`,`no_app_handle cannot_fallback_to_root_crt`,`no_root_cert_resource`,`hit=root_crt path= bytes=<n>`,`read_root_crt_err path= err=`
+- `apply_mtls` (269-306):`use_tls=false skip`,`step=check_client_identity err=missing`,`step=read_identity_pem err=unreadable_after_cert_detected`,`step=identity_from_pem err=`,`step=ca_from_pem err=`,`ok ca_loaded bytes=<n>`,`ca_missing rely_on_system_trust`
+- `build_http_client` (313-329):`ok use_tls=<bool>`,`build_err use_tls=<bool> err=`
+- `parse_allowed_gateway_url` (423-456):`parse_err raw= err=`,`reject_scheme scheme=`,`reject_no_host`,`reject_host host=`,`reject_port got= want=`,`ok url=`
+- `gateway_mtls_proxy` (461-520):`entry method= url=`,`send_err is_connect= is_request= is_timeout= is_redirect= err=`,`body_read_err err=`,`ok status=<n>`
+
+skyline 无 `forward_mtls_stream` / `gateway_mtls_proxy_stream` (W8 §1 已确认），相关埋点无需复制。
+
+### 5. `cargo check` 结果
+
+```
+cargo check -p SkylineStudio --manifest-path apps/skyline/src-tauri/Cargo.toml
+```
+
+用时 **42.58s**(cold build，编译 58 个 crate；超出 prompt 预期 <30s 因初始 build cache 为空）。**0 错误，0 warning** 在 `argo_tls.rs`。编译通过。
+
+### 6. ESCALATEs
+
+1. **skyline 现有 `client_dir_defaults_to_home_dot_argo_tls` test(argo_tls.rs:535-540）在 Windows 下将失败** — test 仍按旧实现断言 `PathBuf::from(env HOME)`；新实现在 `USERPROFILE` set 时优先取 `USERPROFILE`。Demo W5 同样未更新其对应 test(demo argo_tls.rs 无此特定 test，故 demo 未暴露）。orchestrator 需决定：是否允许 W11 修这个 test(1 行改：assert 期望路径改用 USERPROFILE 或 mock env)，或在 Windows 部署时 skip。本次 write-set 内但未主动改 test 逻辑因为属于未明确授权范围。
+2. **`gateway_mtls_proxy` line 467 (old 304) `build_http_client(None, true)` 不传 AppHandle** — 与 demo pre-W4 同缺陷，W8 §10 ESCALATE #2 已列。本次 prompt 未授权改这个签名（改了会传播到 `client_ca_cert_pem(Some(app))` 调用面），留待后续方案 A 派单处理。`tls_log` 中 `no_app_handle cannot_fallback_to_root_crt` 事件可在 debug log 里观察到此路径是否被走到。
+3. **skyline 无 `AppError` enum，无需 cause 字段修复**(W8 §2)– 已按 prompt 跳过。
+4. **skyline JS 侧 `String(error)` 非 bug**(W8 §6)– 已按 prompt 跳过。
+5. **未跑 `cargo build`/`cargo test`/`just dev`** — 按 prompt 指示。
+
+HEAD-guard（任务开始时）:`0639a185 Merge branch 'feat/argo-tls-discovery' of git.sudoai.cc:dev-tools/robot-app-platform into feat/argo-tls-discovery`，改动前已存在 `M apps/skyline/src-tauri/Cargo.toml`（非本次改动，未触摸）。本次只修改 `apps/skyline/src-tauri/src/argo_tls.rs`。未做任何 git 写操作。
+
+Elapsed: 4min18s.

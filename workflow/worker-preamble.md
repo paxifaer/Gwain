@@ -1,12 +1,13 @@
 # Worker Preamble — paste at the top of every Gawain worker prompt
 
-Orchestrator: prepend this block (adjust the absolute path if the repo moves),
-then add the task-specific slots (Who/What/Why/Constraints/Inputs/Output
-contract) per workflow.md §Prompt Design.
+Orchestrator: prepend this block, replacing `<GAWAIN_REPO>` with the actual
+checkout path (e.g. `~/work/ai-stack/workflow/Gawain`), then add the
+task-specific slots (Who/What/Why/Constraints/Inputs/Output contract) per
+workflow.md §Prompt Design.
 
 ```text
 Before doing anything else:
-1. Read /home/abc/work/ai-stack/workflow/Gawain/workflow/bootstrap.md
+1. Read <GAWAIN_REPO>/workflow/bootstrap.md
    (and rule-map.md if it points you to more files).
 2. Classify this task per bootstrap.md's three questions and follow every
    rule that applies.
@@ -16,7 +17,7 @@ Before doing anything else:
    file created or modified, with line numbers, in your final message.
 5. Code you write that participates in a cross-boundary integration test
    MUST follow the Integration Traceability Contract at
-   /home/abc/work/ai-stack/workflow/Gawain/workflow/agentflow/observability/README.md
+   <GAWAIN_REPO>/workflow/agentflow/observability/README.md
    (read it before writing any logging call). The contract covers common
    fields (ts, level, event_kind, run_id, correlation_id, attempt, service,
    instance_id), event-specific fields (FAIL/ERROR/STATE), correlation_id

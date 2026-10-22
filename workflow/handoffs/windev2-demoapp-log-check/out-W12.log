@@ -1,0 +1,55 @@
+## W12 最终报告 — demo `argo_tls.rs` `has_root_cert` mirror W11 修复
+
+### 1. 改动文件 + 行号
+
+`apps/demo/src-tauri/src/argo_tls.rs` — 修改前 line 89-91 (3 行） → 修改后 line 89-99 (11 行）
+
+```diff
+-pub fn has_root_cert(app: &AppHandle) -> bool {
+-    load_root_cert(app).is_some()
+-}
++pub fn has_root_cert(app: &AppHandle) -> bool {
++    let (_, _, ca_path) = build_cert_paths();
++    if ca_path.exists() {
++        tls_log(format!("has_root_cert hit=ca_crt path={}", ca_path.display()));
++        return true;
++    }
++    tls_log(format!("has_root_cert miss=ca_crt path={}", ca_path.display()));
++    let embedded = load_root_cert(app).is_some();
++    tls_log(format!("has_root_cert embedded={embedded}"));
++    embedded
++}
+```
+
+### 2. 修改后 `has_root_cert` 完整 body quote
+
+```rust
+pub fn has_root_cert(app: &AppHandle) -> bool {
+    let (_, _, ca_path) = build_cert_paths();
+    if ca_path.exists() {
+        tls_log(format!("has_root_cert hit=ca_crt path={}", ca_path.display()));
+        return true;
+    }
+    tls_log(format!("has_root_cert miss=ca_crt path={}", ca_path.display()));
+    let embedded = load_root_cert(app).is_some();
+    tls_log(format!("has_root_cert embedded={embedded}"));
+    embedded
+}
+```
+
+优先级镜像 `client_ca_cert_pem` (line 222-264)：先 `<client_dir>/ca.crt` 命中即 true，再 fallback embedded `root.crt`。
+
+### 3. cargo check 结果
+
+`Finished dev profile [unoptimized + debuginfo] target(s) in 2.79s`,**0 errors**。6 warnings 全部为 pre-existing (`lib.rs` unused variable、`skyline_launcher.rs` dead_code 等），与本改动无关。
+
+### 4. scp 同步验证
+
+windev2 `argo_tls.rs` LastWriteTime **8/18/2026 7:58:31 PM**(fresh),`has_root_cert hit=ca_crt` × **1** 命中、`has_root_cert embedded=` × **1** 命中 — 同步确认。
+
+### 5. ESCALATEs
+
+1. **用户需重新编译 + 重启 demo** 让修复生效（windev2 binary 尚未含本 fix)。本次 prompt 禁 `just dev` + kill process，故未操作。
+2. **prompt 描述 "15 行" 但实际 skyline 模板为 11 行** — 严格按 §1 quote 内容 mirror，行数差异属于 prompt 文本预估偏差，语义 100% 一致。
+
+Elapsed: 1min20s.

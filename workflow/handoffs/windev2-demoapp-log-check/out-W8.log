@@ -1,0 +1,175 @@
+所有信息齐全，写最终报告。
+
+---
+
+## W8 最终报告 — skyline 同类问题审查 + log 状态对照
+
+**HEAD-guard**:`d95dc0c Merge branch 'main' of git.sudoai.cc:Parsifal/Gawain`,`M ../../worker-preamble.md` + `?? ../`（与 W3/W4 相同）。本次未做任何写入。
+
+### 1. skyline `argo_tls.rs` `client_dir()` 状态 — 有 HOME bug
+
+`apps/skyline/src-tauri/src/argo_tls.rs` 共 574 行（demo 修复后 1180 行，skyline 显著更小，因**无 streaming 命令 + 无 embedded fallback 中的 `client_identity_pem` 之外的复杂路径**)。
+
+**line 59-67**(VERBATIM，函数体完整 quote):
+```rust
+pub fn client_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var(CLIENT_DIR_ENV) {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".argo-tls")
+}
+```
+**与 demo W5 修复前完全相同的 bug** — Windows 下 HOME 缺失时回退 `"."`。skyline 与 demo 有相同的 Windows 部署目标。
+
+**`tls_log` / tracing**: skyline `argo_tls.rs` 全文 grep `eprintln!|println!|tracing|log::|tls_log|writeln!|OpenOptions` → **0 命中**。与 demo pre-W4 一致，所有决策点全静默。
+
+**决策点清单**（对照 W4 §2):
+| 函数 | 行号 | 静默出口 |
+|---|---|---|
+| `client_dir` | 59-67 | HOME bug，无 env override hit 记录 |
+| `root_cert_resource_path` | 13-22 | resource_dir 失败、每候选 hit 判定 |
+| `load_client_identity` | 73-90 | 4 处 `?` 静默 None |
+| `client_identity_pem` | 93-99 | 2 处 `?` 静默 None |
+| `client_ca_cert_pem` | 106-114 | ca.crt 命中/miss、root.crt fallback 分支 |
+| `apply_mtls` | 132-158 | 4 处 `format!("...{error}")` Err 出口，仅顶层 message |
+| `build_http_client` | 165-173 | 1 处 build 错误 |
+| `parse_allowed_gateway_url` | 266-279 | 4 处 reject，仅 message |
+| `gateway_mtls_proxy` | 289-333 | 0 tracing;line 304 `build_http_client(None, true)` 没传 AppHandle（与 demo line 304 同样问题，无法走 `app` 路径的 `root_cert_resource_path`) |
+
+### 2. skyline `AppError` — 不存在，全部 `Result<_, String>`
+
+**skyline src-tauri/ 中 0 个 `enum AppError`**(grep 全 crate)。`lib.rs:60` `type AppResult<T> = Result<T, String>;`。
+
+仅存在的一个错误 enum 是 `updater/error.rs` `SkylineUpdaterError`（也用 `#[serde(tag = "name")]`，是 demo `AppError` 同款风险来源，但范围只在 updater 命令里）。
+
+**推论**:demo W4 的 `AppError.cause` 修复**不能直接复用**到 skyline，因为 skyline 没有 AppError。但 skyline 的 plain `String` error 在 JS 侧不会触发 `[object Object]`（见 §6)。
+
+### 3. `Cargo.toml` 依赖对照
+
+| 依赖 | demo(W4 修后） | skyline | 对齐？ |
+|---|---|---|---|
+| rustls | 0.23 ring | 0.23 ring | ✓ |
+| reqwest | 0.11 rustls-tls | 0.11(blocking, cookies, json, multipart, rustls-tls) | ✓+额外 blocking/cookies |
+| tauri-app-log | yes | yes(path `crates/tauri-app-log`) | ✓ |
+| tracing / tracing-subscriber | NO | NO | ✓ 同样无 |
+| log / env_logger | NO | NO | ✓ |
+| reqwest-updater 0.12 | — | YES(line 37，独立 updater 通道） | skyline 独有 |
+| rustls `logging` feature | NO | NO | 都未启用 |
+| `windows_subsystem = "windows"` | YES(debug only exempt) | YES(`main.rs:1` `cfg_attr(not(debug_assertions), windows_subsystem = "windows")`) | ✓ 相同 |
+| `[profile.release]` | 全注释 | **不存在** | skyline 用 cargo 默认 |
+| skyline 独有 | — | `tauri-common`、`argo-agent-memory-state`、`tokio-tungstenite rustls-tls-webpki-roots` | — |
+
+### 4. skyline `lib.rs` — 无 `CryptoProvider` install、无 TLS debug log 命令
+
+`grep rustls::crypto|default_provider|install_default|CryptoProvider` lib.rs → **0 命中**。skyline 不显式安装 ring provider，靠 `rustls` feature `ring` 默认 provider(rustls 0.23 行为：只启用一个 provider feature 时自动成为 default，无歧义）。demo 也没有这一行，**对齐**。
+
+**TLS 相关 Tauri 命令**(`lib.rs:1120-1122`):`tls_has_root_cert`、`tls_has_client_cert`、`gateway_mtls_proxy` — skyline 无 `gateway_mtls_proxy_stream`(demo 有）。
+
+**log 模式**:
+- `tauri_app_log::append_app_data_log_line_with_limit` 在 lib.rs:37 import,line 389 + 1018 已使用
+- `skyline_debug_log` 命令在 line 341-393，处理 4 种 channel(data-channel-message / subscribe-session-raw / task-run-state / gateway-session-debug) — TLS channel **未挂**
+- `runtime_log::*` 4 个命令（见 §5)
+- `eprintln!` 总出现：dev_invoke(1) + doubao_asr(10) + doubao_tts(4) = 15 处，argo_tls 0 处
+- `DOUBAO_DEBUG` / `RUST_LOG` env var 在 lib.rs grep → **0 命中**(skyline 完全没有 env-based debug switch)
+
+### 5. `runtime_log/` 子模块概览 — 显著强于 demo 的 `tls_log`
+
+文件：
+```
+mod.rs         — 4 个 Tauri 命令包装 + storage helper
+storage.rs     — RuntimeLogStorage struct, append/read_tail/flush/flush_all
+jsonl.rs       — open_append / rotate_if_needed / read_channel_files / sync_tree
+path.rs        — validate_session_id / validate_channel / validate_record / validate_metadata + stable_hash
+retention.rs   — 未细读；提供 retention 清理（相关 dim)
+types.rs       — RuntimeLogAppendArgs / RuntimeLogCommandError 等
+retention/ + storage/ — 有子目录但仅空 marker(tests)
+```
+
+核心 API(`storage.rs:30-153`):
+```rust
+pub(crate) struct RuntimeLogStorage { limits: RuntimeLogLimits, root: PathBuf }
+impl RuntimeLogStorage {
+    pub(crate) fn new(root: PathBuf) -> Self;
+    pub(crate) fn append(&self, channel: &RuntimeLogChannelArgs, record: &Value)
+        -> Result<(), RuntimeLogCommandError>;
+    pub(crate) fn read_tail(...) -> ...;
+    pub(crate) fn flush_all(&self) -> ...;
+}
+```
+**默认 limits**(line 18-28):channel 2 MB、global 50 MB、单条 record 64 KB、max 10 session、单 session 20 MB。JSONL 格式 + 三代滚动（`.1.jsonl`/`.2.jsonl`)+ 命名空间 channel(`{app_session_id}/{project_id}/{task_id}/{target_id}`)+ schema 校验（`validate_record_fields` 白名单 `ALLOWED_RECORD_KEYS`)+ fsync tree。
+
+**vs demo 的 `tls_log`**:demo `tls_log` 是 30 行 OpenOptions append 无 rotation/无 size limit。skyline `runtime_log` 是 **生产级**。**缺点**：接口设计是"session-scoped taskflow channel",`validate_channel` 强制 projectId+taskId+targetId 三组件，用在 TLS 调试 log 需要先**扩展** `validate_channel` 或绕过 channel。不是开箱即用，但 80% 骨架可复用。
+
+### 6. skyline JS 侧 `String(error)` bug 检查 — **不是 bug**(design difference)
+
+skyline JS 中的 `error instanceof Error ? error.message : String(error)` 出现于 **39 处**(grep 全 src/)。**全部安全**，原因：
+1. skyline Rust app-level 命令**全部返回 `Result<_, String>`**(AppResult)— Tauri reject 时 JS 收到的就是字符串，`String(error)` no-op 正确
+2. `gateway_mtls_proxy` 由 `packages/gateway-client/src/lib/transport.ts` 内部 invoke,W4 已在 line 14 export `extractInvokeErrorMessage` 并在 line 324/389 应用。skyline 通过 `@robot/gateway-client` (line `gatewayConnectTransport.ts:4`) 复用，**直接受益**
+3. updaterClient.ts 是唯一返回 tagged enum 的命令族，用 raw `invoke` + 自带 `parseUpdaterError`(line 24-42）处理 `{name, message}` 形状
+4. `services/tauri-invoke.ts:18-28` 是 skyline 的 invoke 包装器，把字符串 error → Error。潜在风险：如果未来通过 invokeTauri 调一个返回 enum 的命令，line 27 `throw new Error("Unknown Tauri error")` 会**静默丢原 message** — ESCALATE #1
+
+**结论**:demo W4 的"5 处 String(error) 修复"**无需在 skyline 复制**。
+
+### 7. skyline `TlsFailDialog` 等价物 — NetworkConfigDialog
+
+skyline `src/features/projects/workspace/networkConfig/TlsFailDialog.tsx`（独立版本，与 demo 同名但代码不同）。`NetworkConfigDialog.tsx:454-465` 是生产路径的 reason 流出处：
+```ts
+} catch (error) {
+  const detail = error instanceof Error ? error.message : String(error);
+  ...
+  if (isTransportError(error) && targetTlsStatus !== "plain") {
+    setTlsFailReason(detail);
+    setTlsFailOpen(true);
+  }
+}
+```
+`detail` 来源是 mTLS 链路 catch 到的 error。若该 error 是 gateway-client `transport.ts` 经过 `extractInvokeErrorMessage` 后的 `Error(...)`,`.message` 是干净的；若是 skyline app command 返回的 String,`String(error)` no-op 也是干净的。**无 `[object Object]` 风险**。
+
+### 8. skyline 整体 log 状态盘点
+
+**基建**:
+- `tauri-app-log` crate(`append_app_data_log_line_with_limit`)— 已上线
+- `runtime_log/` 模块（独立、完整、生产级）— 已上线，4 Tauri 命令已注册
+- `skyline_debug_log` 命令 — 4 channel 已挂（无 TLS)
+- `eprintln!` 共 15 处，doubao_*(14）是主力，**TLS 0 处**
+- **0 个 tracing/log crate 使用**
+- **0 个 env-based debug 开关**（无 DOUBAO_DEBUG/RUST_LOG 处理）
+
+**可直接复用给 skyline 的 demo 修复**:
+- W5 `client_dir()` USERPROFILE 兜底（**skyline 必须打，纯 copy-paste**)
+- W4 的 `extractInvokeErrorMessage` — skyline 已经通过 `packages/gateway-client` 共享**自动获得**
+
+**需独立应用到 skyline 的修复**:
+- `tls_log` 是 demo 的简陋版，skyline **不应直接复制**，应**复用 runtime_log**（扩展 `validate_channel` 接受无 project/task/target 的"system channel")或**新增 argo_tls 专用 channel 到 `skyline_debug_log`**(lib.rs:341 已支持扩展）
+- AppError.cause 修复**不需要**(skyline 没 AppError)
+
+### 9. 推荐方案矩阵（供 orchestrator 决策派 W9)
+
+| 优先级 | 项 | 文件 + 行号 | 建议 |
+|---|---|---|---|
+| **P0** | skyline `client_dir()` USERPROFILE 兜底 | `apps/skyline/src-tauri/src/argo_tls.rs:65-66` | 复制 W5 diff:`let home = std::env::var_os("USERPROFILE").or_else(\|\| std::env::var_os("HOME")).map(PathBuf::from).unwrap_or_else(\|\| PathBuf::from("."));` + 后续 `tls_log`（若选 P1 方案 A) |
+| **P0** | skyline JS String(error) 修复 | — | **不需要**（见 §6 分析） |
+| **P0** | skyline `AppError.cause` | — | **不需要**(skyline 无 AppError) |
+| **P1** | skyline TLS log — 方案 A：在 `skyline_debug_log` 新增 channel | `lib.rs:341-393` 新增一个 branch + argo_tls.rs 各决策点 helper 调 `tauri_app_log::append_app_data_log_line_with_limit(app, "argo-tls/argo-tls-debug.log", ..., LIMIT)` | 优点：复用既有扶手；缺点：需把 AppHandle 透到 `gateway_mtls_proxy` line 304（与 demo 修复同样要求） |
+| **P1** | skyline TLS log — 方案 B：扩展 `runtime_log` | `runtime_log/path.rs:69` 放开三组件必填 + argo_tls.rs 写 system-channel JSONL | 优点：rotation/size-limit/fsync 全套；缺点：改 validate 逻辑影响面 |
+| **P1** | skyline `gateway_mtls_proxy` line 304 传 AppHandle | `argo_tls.rs:289-333` | 对齐 demo W4 line 573；让 `client_ca_cert_pem` 可以走 embedded root.crt fallback |
+| **P2** | skyline 流式 mTLS 命令补齐 | 新增 `gateway_mtls_proxy_stream` 仿 demo | 若 skyline 未来用 streaming Connect RPC over mTLS |
+| **P2** | skyline `tauri-invoke.ts` 防御性修 | `services/tauri-invoke.ts:24-28` | 当前无害，但换成 `extractInvokeErrorMessage` 或在其 fallback 里 log 原 error 再 throw，避免 "Unknown Tauri error" 静默吞 |
+| **P2** | skyline `SkylineUpdaterError` 是否需要 cause | `updater/error.rs` | 与 demo W4 的 `AppError.cause` 同款，但目前 updater 调用面很小 + parseUpdaterError 已工作，非必须 |
+
+**推荐派 W9 的最小集** = P0(`client_dir()` USERPROFILE)+ P1 方案 A(`skyline_debug_log` 新增 argo-tls channel + argo_tls.rs 决策点埋点 + line 304 传 AppHandle)。
+
+### 10. ESCALATEs
+
+1. **`services/tauri-invoke.ts:24-27` 的 fallback `throw new Error("Unknown Tauri error")`** — 如果任何挂到 `invokeTauri` 的命令在未来返回非字符串 error(tagged enum 或 plain object)，原始 message 会被换为 "Unknown Tauri error" 静默吞。当前调用面全部 String-error 命令，**当前安全但是是定时炸弹**。建议 W9 顺手换成 `extractInvokeErrorMessage` 风格 fallback 或记录原 error 到 console。
+2. **`gateway_mtls_proxy` line 304 `build_http_client(None, true)` 不传 AppHandle** — skyline 与 demo pre-W4 相同缺陷，`client_ca_cert_pem(None)` 走不到 embedded root.crt fallback。orchestrator 需决断：skyline 当前 release 是否依赖 embedded fallback？若否，P0 也不必。
+3. **`SkylineUpdaterError` 是否需要 `cause`** — 与 demo W4 同灵感，但 skyline updater 暂未暴露过类似问题。orchestrator 决断是否一并升级。
+4. **runtime_log `validate_channel` 三组件必填** — 若选 P1 方案 B 需修改 `path.rs:69-76`，但多处 JS client 已按此约束调用，改动会波及其他 channel。orchestrator 倾向方案 A 还是 B 需明示。
+5. **skyline 的 release 构建 `windows_subsystem`** — skyline 与 demo 行为一致，stderr 在 release 下都丢。skyline `eprintln!` 15 处目前在 doubao_* 内，release 下同样不可达 — 与 demo 同病但 W8 未深入排查这 15 处是否影响排障。orchestrator 决断。
+
+**Files written/modified**: **none**(write-set EMPTY，遵守 prompt)。
+
+Elapsed: 7min42s.

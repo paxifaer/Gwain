@@ -64,7 +64,7 @@ Default structure: **sequential pipeline of isolated workers** (architecture →
 
 ## High-Risk Reasoning Gate
 
-Most tasks fail from bad code; a minority fail from invalidated upstream reasoning silently propagating into correct-looking code. For that minority, use the reasoning-ledger mechanism (discussion-sync §9). The orchestrator decides ONCE, at Plan time, whether a task is high-risk:
+Most tasks fail from bad code; a minority fail from invalidated upstream reasoning silently propagating into correct-looking code. For that minority, use the task-state layout with frozen, user-approved acceptance criteria (see [`skills/febe-contract/SKILL.md`](../skills/febe-contract/SKILL.md)); the old reasoning-ledger subsystem (discussion-sync §9) was removed on 2026-10-22. The orchestrator decides ONCE, at Plan time, whether a task is high-risk:
 
 Hard triggers — any one makes the task high-risk:
 - The task will produce or modify formal derivations (equations, closed-form solutions, optimization objectives).
@@ -80,7 +80,7 @@ Rules:
 - Judge by task structure, never by "the agent feels the task is complex".
 - Default is the normal workflow. The user may force either direction.
 - Record the decision as one line in task.md (or in the spec file for tasks without the task-state layout), e.g. `risk: high — triggers: H1, S3`.
-- High-risk tasks MUST use the task-state layout (task.md / state.md / decisions.md / evaluation.md / sync/) — for them it is mandatory, not opt-in — and follow the §9 reasoning protocol (ledger entries, verdicts, invalidation).
+- High-risk tasks MUST use the task-state layout (task.md / state.md / decisions.md / evaluation.md) — for them it is mandatory, not opt-in — and freeze user-approved acceptance criteria up front per [`skills/febe-contract/SKILL.md`](../skills/febe-contract/SKILL.md).
 - Workers of high-risk tasks receive a Reasoning State snapshot inside their prompt and MUST NOT modify symbols listed in state.md `## Blocked`; needing to touch one is an escalation trigger.
 
 ## Output Contract — The Worker Writes For You
@@ -164,56 +164,15 @@ per `bootstrap.md` — the contract is intentionally sticky.
 | Sharing context by name | workers can't see your session — files with contents, not "as discussed" |
 
 
-## Model Selection
+## Model Selection (removed 2026-10-22)
 
-Before starting a task, inspect `model.yaml` and select the appropriate model.
+Model routing belongs to the harness (see the repo's `AGENTS.md` / dispatch rules);
+Gawain no longer maintains a model registry.
 
-### Rules
+## Discussion Session Sync (removed 2026-10-22)
 
-1. Never assume a model is available unless it is defined in `model.yaml`.(file where it is at ../model/model.yaml this repo)
-2. Classify the task by complexity and execution type before selecting a model.
-3. Prefer:
-   - `t9s/deepseek-v4-flash`: fast coding, search, inspection, testing, verification, repetitive tasks.
-   - `t9s/kimi-k3`: general development, debugging, task decomposition.
-   - `t9s/glm-5.2`: architecture, complex reasoning, difficult debugging, large refactoring.
-   - `default`: when explicit model selection is unnecessary.
-4. Do not ask the user for model selection by default.
-5. Ask only when model choice has a meaningful impact on quality, speed, cost, or task success.
-6. Respect an explicit user model preference and do not ask again.
-7. Model selection may change during execution. Escalate to a stronger model when the task becomes more complex; use a fast model for routine execution and verification.
-
-### Selection Record
-
-Before execution, record the selected model and selection mode:
-
-```yaml
-model_selection:
-  model: t9s/deepseek-v4-flash
-  mode: automatic
-  reason: coding_and_testing
-```
-
-## Discussion Session Sync (Opt-in)
-
-The Discussion Session and the Orchestrator Session serve different roles and should hold different context: the Discussion is where the human explores options freely, the Orchestrator is where committed state lives and work is dispatched. Letting the full Discussion back-and-forth flood the Orchestrator's context defeats the isolation goal of this workflow. The sync protocol bridges the two with file-only structured deltas — only confirmed Decisions, Constraints, Requirements, Progress, Open Questions, and Rejected alternatives cross the boundary, as numbered YAML payloads in the task's `sync/` directory.
-
-This is **opt-in and not a precondition**. A new task opts in by creating the task-state layout (`task.md`, `state.md`, `decisions.md`, `evaluation.md`, `sync/`); a task that does not create those files keeps using the legacy `SPEC-*.md + PROMPT-*` convention. Reaching for the sync protocol earns its keep only on tasks with real Discussion overhead — one-shot workers do not need it.
-
-```
-Discussion --/sync--> sync/NNN.yaml --ingest--> Orchestrator --> Task State
-  (human explores)    (file-only delta)        (reads pending)    (ledger)
-```
-
-- Protocol: [`discussion-sync/protocol.md`](discussion-sync/protocol.md)
-- Extractor prompt: [`discussion-sync/prompts/PROMPT-disc-extractor.md`](discussion-sync/prompts/PROMPT-disc-extractor.md)
-- Ingest prompt: [`discussion-sync/prompts/PROMPT-orch-ingest.md`](discussion-sync/prompts/PROMPT-orch-ingest.md)
-- Templates: [`discussion-sync/templates/`](discussion-sync/templates/)
-
-**Idempotency:** repeated `/sync` on the same Discussion state MUST NOT produce a new payload or mutate any ledger file; ingest rewrites a payload's `status:` to `applied` / `rejected` / `conflict` and never deletes it, so repeated ingest on a fully-applied task is a no-op.
-
-**Do not:**
-- No MCP server, no daemon, no file-watcher. The protocol is carried by markdown + yaml + prompts.
-- No retroactive migration of existing tasks under `workflow/handoffs/*` — they stay on the old convention.
-- No nested dispatch: the extractor and ingest prompts run inside their respective sessions; they do not spawn sub-processes.
-
-If a task trips the High-Risk Reasoning Gate (see above), the task-state layout is mandatory for that task rather than opt-in.
+The sync subsystem (protocol, extractor/ingest prompts, templates, examples) was
+deleted after the 2026-08-24 audit recorded zero adoption plus P0 defects. Use
+`task.md` / `state.md` / `evaluation.md` for task state and
+[`skills/febe-contract/templates/acceptance.md`](../skills/febe-contract/templates/acceptance.md)
+for acceptance criteria.

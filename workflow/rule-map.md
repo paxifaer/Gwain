@@ -16,13 +16,7 @@ Entry point for all agents: [`bootstrap.md`](bootstrap.md).
 | 6 | Escalation triggers | workflow.md §When to Escalate | always | lazy | P0 |
 | 7 | Red flags / failure modes & anti-patterns | workflow.md §Red Flags, §Failure Modes | self-diagnosis | lazy | P1 |
 | 8 | High-Risk Gate (H1/H2 hard, S1–S4 soft; risk: high → layout mandatory) | workflow.md §High-Risk Reasoning Gate | plan time, once per task | plan phase | P0 |
-| 9 | Model selection | workflow.md §Model Selection + ../model/model.yaml | task start | plan phase | P1 |
-| 10 | Sync opt-in, idempotency triad, do-nots | workflow.md §Discussion Session Sync | task opts in | plan phase | P1 |
-| 11 | Sync protocol core (closed sets, R-1..R-11, ledger authority) | discussion-sync/protocol.md | sync active | on opt-in | P1 |
-| 12 | Reasoning ledger §9 (4-state machine, birth rules, invalidation Step0-6, verdict schema, DER/D prefixes) | discussion-sync/protocol.md §9 | task.md has `risk: high` | on Gate hit | P0 (conditional) |
-| 13 | Task-state templates (task/state/decisions/evaluation) | discussion-sync/templates/ | layout in use | on opt-in / Gate hit | P1 |
-| 14 | Extractor / ingest prompts (incl. ingest §3.9 sweep) | discussion-sync/prompts/ | running those sessions | at that session start | P1 |
-| 15 | Examples (001 sync ingest dry-run, 002 high-risk swerve) | discussion-sync/example/ | learning / dry-run reference | lazy | P2 |
+| 9 | febe-contract — front/back integration contract workflow (requirements freeze, user-approved acceptance, adversarial close) | [skills/febe-contract/SKILL.md](../skills/febe-contract/SKILL.md) | frontend↔backend / cross-boundary tasks | task start | P0 |
 | 16 | Hard constraints + worker preamble + recovery protocol | bootstrap.md, worker-preamble.md | always | session start | P0 |
 | 17 | Traceability contract — overview & workflow-policy boundary | agentflow/observability/README.md | worker/verifier entry to traceability | first load | P0 |
 | 18 | Traceability contract — context (8 common fields, identity model, IP≠identity, field form) | agentflow/observability/context.md | worker writes integration code | before logging call | P0 |
@@ -39,17 +33,14 @@ Entry point for all agents: [`bootstrap.md`](bootstrap.md).
 | workflow/bootstrap.md | NORMATIVE — entry point |
 | workflow/rule-map.md | NORMATIVE — this index |
 | workflow/worker-preamble.md | NORMATIVE — dispatch template |
-| workflow/discussion-sync/protocol.md | NORMATIVE — sync protocol + §9 |
-| workflow/discussion-sync/templates/ | NORMATIVE — file shapes |
-| workflow/discussion-sync/prompts/ | NORMATIVE — role prompts |
-| workflow/discussion-sync/ARCHITECTURE.md | EXPLANATORY — design narrative |
-| workflow/discussion-sync/example/ | EXAMPLE — dry-run fixtures |
+| workflow/discussion-sync/（2026-10-22 已删除） | REMOVED — zero adoption + P0 defects (see docs/audits/2026-08-24-verifier-test-trace-audit.md); acceptance format superseded by skills/febe-contract/templates/ |
 | workflow/agentflow/observability/README.md | NORMATIVE — traceability contract entry + workflow-policy boundary |
 | workflow/agentflow/observability/context.md | NORMATIVE — 8 common fields + identity model (IP≠identity) |
 | workflow/agentflow/observability/events.md | NORMATIVE — FAIL/ERROR/STATE taxonomy + scene-specific points + first-failure principle |
 | workflow/agentflow/observability/propagation.md | NORMATIVE — correlation_id across 6 transports + run_id via env + attempt semantics |
 | workflow/agentflow/observability/aggregation.md | NORMATIVE — per-run log layout for verifier replay |
 | workflow/agentflow/observability/evidence.md | NORMATIVE — 8 verifier checks + bypass vectors + worked example + 10-question reconstruction table |
-| model/model.yaml | NORMATIVE — model registry |
-| docs/reasoning.md | HISTORICAL — pre-freeze design record, superseded by protocol.md §9 |
+| skills/febe-contract/ | NORMATIVE — front/back integration contract skill (requirements freeze, templates, adversarial checklist) |
+| model/（2026-10-22 已删除） | REMOVED — model routing belongs to the harness (AGENTS.md / dispatch rules), not Gawain |
+| docs/reasoning.md（2026-10-22 已删除） | REMOVED — historical design record |
 | workflow/handoffs/ | LEGACY-NON-NORMATIVE — old SPEC-*/PROMPT-* convention; do not mine for rules; workflow.md forbids retro-migration |

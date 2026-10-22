@@ -1,0 +1,71 @@
+## W14 最终报告 — skyline `tls_has_root_cert` 未被 invoke 诊断 + Rust 入口埋点
+
+### 1. 诊断结果： **Hypothesis 2/3 已排除；Hypothesis 1/4 待用户重验；新增 Hypothesis 5 (devUrl 端口不一致，嫌疑最大）**
+
+- **H2 (frontend 未同步） — 排除**:windev2 `argo-tls.ts` (8/14 8:18 PM, 284 B) 与 Linux 版逐字一致，调 `invokeTauri("tls_has_root_cert")`;`RealGatewayServerDialog.tsx` (8/18 3:32:51 PM, 8030 B) line 13 import、line 86 useState、line 99 `hasRootCert()`、line 232 prop 传递齐全。
+- **H3 (binary 内嵌 bundle 过期） — 排除**:windev2 `apps/skyline/dist/` **存在**且 8/18 15:46:20 重新构建过（晚于 .tsx 源 3:32:51 PM);`Select-String tls_has_root_cert` 在 `dist/assets/_projectId-ZaNMEIqw.js` 命中 — JS invoke 调用**已在 bundle 中**。binary strings 亦含 `tls_has_root_cert`/`has_root_cert hit=ca_crt`/`client_dir resolved dir=` 等 Rust 注册与 W11 fix 标记；`hasRootCert` 字样未在 binary strings 命中，符合预期（前端走 devUrl,minify 后字符串消失）。
+- **H1 (invoke 在 Tauri 边界失败，被 .catch 吞） — 未证**:dialog.tsx 的 `.catch` 只 `console.warn` 不改 state(W13 在 JS 侧引用）,write-set 外，未修。
+- **H4 （用户没打开 dialog) — 未证**：无法从远程区分。
+- **H5 (devUrl 与 vite 实际端口不一致，嫌疑最大）**:`tauri.conf.json` 的 `devUrl` 写的是 **"http://localhost"**（即 port 80，无显式 port);vite 默认 `SKYLINE_DEV_PORT=1421`(vite.config.ts:19);netstat 证实 **1420 无人听，::1:1421 Listen** (PID 5772 node.exe);HTTP `localhost:1421` 返回 200 vite dev HTML;HTTP `localhost:80` 无响应。如果当前 SkylineStudio.exe 是按 `devUrl=http://localhost` 去打开 UI，那 WebView2 拿的是 port 80 → 连接拒绝 → 页面根本不加载 → JS 不跑 → `hasRootCert()` 永远不会 invoke → `tls_log` 永远不会写。这与"log 不存在"完全自洽。**Linux tauri.conf.json 同样写 `http://localhost`**,windev2 与 Linux 同步，属配置而非 windev2 问题。
+
+### 2. windev2 frontend 代码同步状态
+- `argo-tls.ts` 284 B, 8/14 8:18 PM — 与 Linux 逐字一致
+- `RealGatewayServerDialog.tsx` 8030 B, 8/18 3:32:51 PM — 含 `hasRootCert` 导入/调用/state，与 Linux 同步
+
+### 3. dist 目录 + frontend bundle
+- `dist/` **存在**,1 项 `assets/`,mtime 8/18 15:46:20（晚于 .tsx 源）,index.html 461 B
+- `dist/assets/_projectId-ZaNMEIqw.js` 命中 `tls_has_root_cert` invoke — bundle 含 W11 调用链
+
+### 4. binary strings 扫描
+- `tls_has_root_cert` **FOUND**(Tauri 命令注册）
+- `tls_has_client_cert` **FOUND**
+- `has_root_cert hit=ca_crt` **FOUND**(W11 fix)
+- `client_dir resolved dir=` **FOUND**(W10 fix)
+- `hasRootCert` (JS 标识符） MISSING — 符合预期（minify)
+
+### 5. skyline 进程状态
+- PID 23164 `SkylineStudio.exe` 8/18 20:04:55 启动，父进程 **cargo.exe PID 15684**(`cargo run --no-default-features --color always --`)**仍在跑**
+- 同 session 兄弟进程：just.exe 18816、bun.exe×5、vite.exe 1176（父链 bun run dev)、node.exe 5772（监听 ::1:1421)
+- **`C:\Users\jack\.argo-tls\argo-tls-debug.log` 仍不存在** — 自 8:04:55 PM 进程启动以来，没有任何 `tls_log` 写入路径被触发
+
+### 6. 修复内容
+**文件**: `apps/skyline/src-tauri/src/argo_tls.rs`(write-set 内，仅 1 文件）:
+- 修改 268-275 → 新 267-281,`tls_has_root_cert` 入口 + 返回值埋点 2 条；`tls_has_client_cert` 入口 + 返回值埋点 2 条
+```rust
+#[tauri::command]
+pub async fn tls_has_root_cert(app: AppHandle) -> Result<bool, String> {
+    tls_log("tls_has_root_cert invoked");
+    let result = has_root_cert(&app);
+    tls_log(format!("tls_has_root_cert result={result}"));
+    Ok(result)
+}
+#[tauri::command]
+pub fn tls_has_client_cert() -> bool {
+    tls_log("tls_has_client_cert invoked");
+    let result = load_client_identity().is_some();
+    tls_log(format!("tls_has_client_cert result={result}"));
+    result
+}
+```
+- `cargo check -p SkylineStudio` clean,0 warning 0 error
+- scp 后 windev2 argo_tls.rs LastWriteTime **8/18 8:20:29 PM**, 26995 B,4 处 `tls_has_*_cert invoked/result=` 字符串均命中
+
+### 7. 用户下一步验证
+1. **停旧 PID 23164**，重跑 `just dev-tauri-skyline`（让 W14 埋点进入 binary)
+2. 启动 skyline，打开 **RealGatewayServerDialog**
+3. 读 `C:\Users\jack\.argo-tls\argo-tls-debug.log`:
+   - 见 `tls_has_root_cert invoked` + `has_root_cert hit=ca_crt` → invoke 通，UI 警告应消失
+   - log 仍不生成 → 走 ESCALATE #2 (devUrl 端口不一致，WebView2 拿不到页面）
+   - 见 `invoked` 但 `result=false` → 查 `client_dir resolved dir=` 与 `miss=ca_crt` 行，看路径
+4. 打开 DevTools 看 console 是否有 invoke error 文本
+
+### 8. ESCALATEs
+1. **现有 binary 还没重启**:PID 23164 跑的是 7:46 PM binary（不含 W14 埋点）。用户必须手动 kill 并 `just dev-tauri-skyline`。本 prompt 禁 kill + just dev，未操作。
+2. **Hypothesis 5 (devUrl=http://localhost 与 vite 1421 端口不一致，嫌疑最大） 在 write-set 外**:`tauri.conf.json:8` 需改成 `http://localhost:1421`（或 `${SKYLINE_DEV_PORT}`），但写-set 仅限 argo_tls.rs/lib.rs/main.rs。强烈建议 orchestrator 派单审：如果 WebView2 按 tauri.conf.json devUrl 加载 port 80 拿不到页面 → JS 永远不跑 → 这能同时解释 "log 不存在" + "为啥用户又说看到警告"（可能用户看的是更旧 session 的截图/记录）。
+3. **JS 侧 `.catch(console.warn)` 静默吞错，与 invoke=false 无法区分**(W13 ESCALATE #1 重申，write-set 外）。
+4. **`tls_has_client_cert` 埋点同步加入但未在 prompt 主要求范围内** — 属同源加固，可视为 buddy fix。
+5. **vite 实际监听在 ::1 (IPv6) 1421，若 WebView2/环境强制 IPv4 localhost 仍可能 connection refused** — 需用户在 windev2 自检 `Test-NetConnection localhost -Port 1421`。
+
+**Files modified**: `apps/skyline/src-tauri/src/argo_tls.rs` 1 个（write-set 内）。未动 lib.rs / main.rs。
+
+Elapsed: 9min40s.

@@ -1,0 +1,75 @@
+## W11 最终报告 — skyline "本机缺 rootCA 证书" 警告诊断 + 修复
+
+### 1. 诊断结果： **情况 1**
+
+windev2 argo_tls.rs 已有 W10 USERPROFILE×2 + tls_log×39(LastWriteTime 7:19:45 PM,26,337 字节）,scp 完整。但 `tls_has_root_cert` → `has_root_cert` → `load_root_cert` → `root_cert_resource_path` 链路**只查 embedded resource_dir 的 root.crt**(argo_tls.rs:41-65),**不查 `<client_dir>/ca.crt`**。用户工作站 `C:\Users\jack\.argo-tls\ca.crt` 已部署 (8/18 4:05 PM)，但 `has_root_cert` 看不到，故返回 false → JS 收到 false → dialog 渲染 ROOT_CA_MISSING 文案。
+
+### 2. windev2 skyline 进程状态
+
+- PID **27752**,StartTime **8/18/2026 7:41:07 PM**
+- Path `D:\code\dang\robot-app-platform\apps\skyline\src-tauri\target\debug\SkylineStudio.exe`
+- EXE LastWriteTime **7:28:08 PM** （晚于 argo_tls.rs 改 7:19:45 PM) — **新 binary，包含 W10 修复**
+
+### 3. argo-tls-debug.log 最新条目
+
+`C:\Users\jack\.argo-tls\argo-tls-debug.log` **不存在**(Test-Path False)。目录内仅有 ca.crt / client.crt / client.key （各 8/18 4:05 PM 部署）。说明：进程 7:41 PM 启动后 `tls_has_root_cert`/`tls_has_client_cert`/`apply_mtls`/`client_dir` 等含 tls_log 的函数**至今未被任何代码路径调用**。可能 dialog 在新 binary 启动后尚未被用户触发；用户看到的 warning 来自更早的旧进程 session。
+
+### 4. `tls_has_root_cert` 命令实现 quote
+
+`apps/skyline/src-tauri/src/argo_tls.rs:253-256`:
+```rust
+#[tauri::command]
+pub async fn tls_has_root_cert(app: AppHandle) -> Result<bool, String> {
+    Ok(has_root_cert(&app))
+}
+```
+旧 `has_root_cert` （修复前 line 85-87):
+```rust
+pub fn has_root_cert(app: &AppHandle) -> bool {
+    load_root_cert(app).is_some()  // ← 仅 embedded root.crt,不查 client_dir/ca.crt
+}
+```
+
+### 5. 警告文案 quote
+
+`apps/skyline/src/features/projects/workspace/workspaceTaskflowMessages.ts:2304-2307`:
+```ts
+export const WORKSPACE_REAL_GATEWAY_SERVER_TLS_HINT_ROOT_CA_MISSING = msg({
+  id: "skyline.taskflow.workspace.realGatewayServer.tls.hintRootCaMissing",
+  message: "⚠ 本机缺 root CA 证书，连接将失败",
+});
+```
+zh-CN .po 同步 zh-CN/workspace.po:2160。渲染点 `RealGatewayServerAddressField.tsx:118-131` （当 `protocol === "https"` 且 `rootCertAvailable === false`)。`hasRootCert()` 在 `services/argo-tls.ts:3-5` 调 `tls_has_root_cert`。
+
+### 6. 修复内容
+
+**文件**: `apps/skyline/src-tauri/src/argo_tls.rs`（修改行 85-87 → 新 85-101,15 行替换 3 行）:
+
+```rust
+pub fn has_root_cert(app: &AppHandle) -> bool {
+    let (_, _, ca_path) = build_cert_paths();
+    if ca_path.exists() {
+        tls_log(format!("has_root_cert hit=ca_crt path={}", ca_path.display()));
+        return true;
+    }
+    tls_log(format!("has_root_cert miss=ca_crt path={}", ca_path.display()));
+    let embedded = load_root_cert(app).is_some();
+    tls_log(format!("has_root_cert embedded={embedded}"));
+    embedded
+}
+```
+优先级镜像 `client_ca_cert_pem`(line 212-251)：先 `<client_dir>/ca.crt` 命中即 true，再 fallback embedded root.crt。新写 3 处 `tls_log`。
+
+- **cargo check**: `Finished dev profile [unoptimized + debuginfo] target(s) in 2.79s`,0 warnings 0 errors
+- **scp 同步**: windev2 argo_tls.rs LastWriteTime 7:45:33 PM,`has_root_cert hit=ca_crt` × 1 命中、`embedded=` × 1 命中 — 同步确认
+
+**Files modified**: `apps/skyline/src-tauri/src/argo_tls.rs` 1 个（write-set 内）。未动 `lib.rs`/`main.rs`。
+
+### 7. ESCALATEs
+
+1. **用户需重新编译 + 重启 skyline**:binary 7:28 PM 不含本次 has_root_cert 修复（7:45 PM scp)。用户须停 PID 27752，重新跑 `just dev-tauri-skyline`，然后再打开 RealGatewayServerDialog 验证 `argo-tls-debug.log` 出现 `has_root_cert hit=ca_crt` + UI 显示 ROOT_CA_READY。本次 prompt 禁 `just dev` + kill process，故未操作。
+2. **demo app 是否有同款 bug 未排查** — `tls_has_root_cert` 可能存在 demo 侧同款独立路径实现，跨 write-set 未查。若 demo 同样在 dialog 用同款 hint,orchestrator 决定派 W12 审查。
+3. **`tls_has_client_cert` (line 259-261) 调 `load_client_identity()`，后者经 W10 修复走 `client_dir()`** — 该命令语义正确，无需修。
+4. **argo_tls.rs:567-579 现有 test `client_dir_defaults_to_home_dot_argo_tls` 在 Windows USERPROFILE set 时会失败**(W10 ESCALATE #1 已在册，本次 write-set 内但属 test 改动未动）。
+
+Elapsed: 4min55s.

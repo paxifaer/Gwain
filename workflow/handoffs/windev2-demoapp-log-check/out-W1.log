@@ -1,0 +1,53 @@
+## W1 final report — windev2 demoapp run-log inspection
+
+### 1. Tauri 进程
+- PID 28188, ProcessName `SudoRobot`
+- Path: `D:\code\dang\robot-app-platform\target\debug\SudoRobot.exe` — **debug 构建**
+- StartTime: 2026-08-18 16:50:35 （本机时）
+
+### 2. Tauri app-data 目录
+- `robot-config.json` 289 B，mtime 16:51:45
+- `demo-tts-debug.log` 21 KB，mtime 16:32:46
+- `taskflow-debug.log` 3.7 MB，mtime 16:32:35
+
+**关键：两个 log 都在 16:32 停止写入，进程 16:50 才启动 → 当前 debug 进程从未向这些 log 写过任何行**，佐证 `argo_tls.rs` 无 tracing。
+
+### 3. Log 摘抄
+- `demo-tts-debug.log`: tail 100 行只命中旧 `doubao-mse-play-error` (2026-07-13)，无 TLS。
+- `taskflow-debug.log`: 在 tail 5000 行内 grep `TLS|handshake|110\.65|50053|rustls|mTLS` → 0 命中。今日（2026-08-18）仅 1 行 WebRTC `selectedCandidatePair` (08:32:35Z, remoteAddress=192.168.100.100:45731, connected)，亦在当前进程启动前。**无 TLS 错误**被记录。
+
+### 4. `~/.argo-tls/`
+- `ca.crt` 615 B, SHA1=`2C7A91D418362FF48235381150B470592CB038A0`, Subject/Issuer=`CN=argo-tls-root`, 2026-08-13 → 2036-08-10, Thumbprint=`FA25B27A…ED34`
+- `client.crt` 684 B, SHA1=`5416A974…A0D516`, Subject=`CN=argo-tls-client`, Issuer=`CN=argo-tls-root`, 2026-08-14 → 2027-08-14, Thumbprint=`681D234C…D752`
+- `client.key` 227 B, SHA1=`326ECD7B…DAE6`， 均在 16:05:29 刷新。
+
+### 5. windev2 → SP000065 连通性
+- `Test-NetConnection 192.168.110.65:50053` → **True**
+- `Test-NetConnection 192.168.100.100:50053` → **False**（TCP 拒绝/失败）
+- `SslStream.AuthenticateAsClient(192.168.110.65:50053)` → **TLS_OK**, server cert `CN=argo-tls-node` issued by `CN=argo-tls-root`
+- `SslStream.AuthenticateAsClient(192.168.100.100:50053)` → **TLS_FAIL: 目标计算机积极拒绝，无法连接 192.168.100.100:50053**
+
+### 6. 其他发现 — **核心结论**
+`robot-config.json` 内容：
+```json
+{"robot_ip":"192.168.100.100:50051","message":"TLS 连接失败","name":"65","status":"Disconnected",
+ "robot_id":"65-1787043105374", "is_simulator":false}
+```
+**应用配置的端点是 `192.168.100.100:50051`，但**
+- 端口错：spec 是 50053(mTLS)，配置写成 50051
+- 网络路由错：从 windev2 实际可达的是 110.65；100.100:50053 测件都不通
+- 这台机器之前曾从 100.100 网段上线（`taskflow-debug.log` 中有 `192.168.100.165` 作为本地 IP 的 WebRTC host candidate），现在网段似乎已切到 110.x，旧配置滞留。
+
+git: `D:\code\dang\robot-app-platform` **不是 git 仓库**。TEMP 有历史 `sudorobot-aliyun-0.1.xx / sudorobot-demo-release-* / sudorobot-win-*` 打包残留，最新 `sudorobot-aliyun-0.1.51` 今日 12:12。
+RUST_LOG/ARGO_TLS_CLIENT_DIR/ARGO_MTLS_PORT/ARGO_GATEWAY_HOSTS 全为空。
+`D:\code\dang\robot-app-platform\` 下回收出的唯一 `.log` 是 npm 依赖内 `lint.log`(0 B)。
+
+### 7. ESCALATEs
+1. `robot_ip` 的 IP+端口（100.100:50051）与 spec 期望（110.65:50053）严重不符 — 需要 orchestrator 判断是配置 bug 还是 UI 显示的"上次失败快照"。JS 把 `[object Object]` 字符串化之前可能把 `AppError::RequestFailed` 的 source 写到了这里，但看不出原本网络栈错误码。
+2. `taskflow-debug.log` 在当前进程启动后 0 写入 — 印证 TLS 路径无 tracing；建议加 tracing + 重建。
+3. 100.100:50053 不可达但旧配置里记了 100.100:50051 — 是否已经切换网段/IP 策略？需要用户确认部署拓扑。
+4. 100.100 网络 disconn 的错误信息为远端 PS 中文 GBK 输出，行内乱码不影响判定（已校对 `target 100.100:50053`明确）。
+
+Files written/modified: none (read-only).
+
+Elapsed: 1min17s

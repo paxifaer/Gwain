@@ -28,11 +28,13 @@ sessions. The normative methodology (铁律) is [`workflow.md`](workflow.md).
 1. **Will you plan / dispatch / judge work?** → Read [`workflow.md`](workflow.md) in
    full before doing anything else.
 2. **Does the task have a task-state layout?** (`task.md` + `state.md` + `decisions.md`
-   + `evaluation.md` + `sync/`) → Read [`discussion-sync/protocol.md`](discussion-sync/protocol.md).
-3. **Does `task.md` contain `risk: high`?** → protocol.md §9 (Reasoning Ledger) is
-   mandatory and the layout is not opt-in. Workers: symbols listed in the task's
-   `state.md` under `## Blocked` are untouchable; needing to modify one is an
-   ESCALATE trigger.
+   + `evaluation.md`) → acceptance rules live in
+   [`skills/febe-contract/templates/acceptance.md`](../skills/febe-contract/templates/acceptance.md).
+3. **Does `task.md` contain `risk: high`?** → the layout is mandatory and acceptance
+   criteria must be frozen and user-approved up front (see
+   [`skills/febe-contract/SKILL.md`](../skills/febe-contract/SKILL.md)). Workers:
+   symbols listed in the task's `state.md` under `## Blocked` are untouchable;
+   needing to modify one is an ESCALATE trigger.
 4. **Will you write code that participates in a cross-boundary integration test?**
    (multi-process, multi-machine, multi-protocol calls: frontend↔backend,
    cloud↔robot, RPC, zenoh, Tauri invoke, WebSocket, IPC) → Read
@@ -60,24 +62,3 @@ No to all four → you are a plain worker; follow your prompt's output contract
    (e.g. "phase: verify worker W3; next: read its final message").
 5. Never infer which rules apply from conversational memory — infer from this
    file, [`rule-map.md`](rule-map.md), and the task's files.
-
-## Runtime Driver (SessionStart hook)
-
-A read-only SessionStart hook (`scripts/gawain-session-start.sh`) runs when a
-Claude Code session starts under this repo root. It scans
-`workflow/Gawain/workflow/handoffs/*/sync/*.yaml`, lists payloads whose
-`status:` is `pending`, and warns about `missing_sync` gaps in numeric IDs.
-Its output is injected into the agent's context at startup.
-
-It does NOT auto-ingest: pending payloads are still applied by explicitly
-running `prompts/PROMPT-orch-ingest.md` per the bootstrap chain. It does NOT
-modify any file, so task state is never mutated by the hook.
-
-Debug / disable: the hook is registered in
-`/home/abc/work/ai-stack/.claude/settings.json` under `hooks.SessionStart`.
-To disable, delete that block (or the whole `"hooks"` object). To run it
-manually: `scripts/gawain-session-start.sh --verbose`.
-
-Apply pending syncs by following
-[`discussion-sync/protocol.md`](discussion-sync/protocol.md) and ingesting via
-`discussion-sync/prompts/PROMPT-orch-ingest.md`.

@@ -1,0 +1,97 @@
+All evidence gathered. Writing final report.
+
+---
+
+## W3 最终报告 — demo app + argogateway-server log/tracing 充足性审查
+
+### 1. 客户端 Rust 侧日志现状 — `argo_tls.rs`
+
+**路径** `apps/demo/src-tauri/src/argo_tls.rs`(1180 行）。生产代码 **0 条 tracing/eprintln/app_data_log** — 仅 `#[cfg(test)]` 内 2 处 `eprintln!`(line 739/854 测试计时）。决策点全静默：
+
+| 函数 | 行号 | 静默决策点 |
+|---|---|---|
+| `root_cert_resource_path` | 20-29 | 候选路径找不到、exists 判定 |
+| `load_client_identity` | 80-97 | PEM 解析失败、certs 为空、key 解析失败，全部 `?` → `None` |
+| `client_identity_pem` | 102-108 | `read` 失败 → `None` |
+| `client_ca_cert_pem` | 115-123 | ca.crt 与 fallback `resources/root.crt` 两条路径，谁 hit 谁 miss |
+| `apply_mtls` | 142-168 | 4 个 `AppError::request_failed(format!("...{e}"))` 出口（line 151/156/158/163)，仅消 message 顶层，无 cause 链 |
+| `build_http_client` | 180-185 | `builder.build()` 失败 |
+| `parse_allowed_gateway_url` | 278-291 | scheme/host/port 三个 reject 分支 |
+| `gateway_mtls_proxy` | 300-346 | line 304 `build_http_client(None, true)` 不传 AppHandle、line 317-320 reqwest send 失败仅转 String 顶层 |
+| `forward_mtls_stream` | 383-459 | line 391 同上、line 407 send 失败只发 Error event 不留痕 |
+| `gateway_mtls_proxy_stream` | 472-495 | line 477 reject 仅 message、line 484 spawn 失败 |
+
+`error.rs` 是 `#[serde(tag = "name")]`,line 8:`pub enum AppError { RequestFailed { message: String }, ... }`。
+Tauri invoke 拒绝时 JS 拿到 **plain object `{name:"RequestFailed", message:"..."}`** — 这就是 `String(error)` → `"[object Object]"` 的根因。
+无 `cause`/`debug`/`source` 字段，error 链被 `format!("...: {e}")` 拍平成顶层一行。
+
+`Cargo.toml` 行 33 `reqwest = {... features=["rustls-tls"]}`、行 45 `rustls={version="0.23",default-features=false,features=["ring"]}`。**rustls `logging` feature 未启用**;**Cargo.toml 中无 `tracing`/`tracing-subscriber`/`log`/`env_logger`**(Cargo.lock 中的 tracing 全是 transitive)。`[profile.release]` 全注释。
+
+### 2. 客户端 JS 侧错误传播链 — `String(error)` bug
+
+| 文件 | 行号 | 现状 | 建议 |
+|---|---|---|---|
+| `transport.ts` | 302-306 | `err instanceof Error ? err : new Error(String(err))` — 把 plain object 转成 `Error("[object Object]")` | 见下 fix |
+| `transport.ts` | 362(`invoke<MtlsProxyResponse>`) | 无 try/catch — 直接 throw 到上游 | Tauri 拒绝即 `{name,message}` 对象 |
+| `robot-sdk.ts` | 136 | `error instanceof Error ? error.message : String(error)` | bug |
+| `manage-robot.tsx` | 267/391/523/652 | 同上 | bug × 4,523 直接把 `[object Object]` 塞给 `TlsFailDialog.reason` |
+| `TlsFailDialog.tsx` | 84 | `{reason}` 直渲 | 修复上游即可 |
+
+**统一修复**（每个 catch 点必须做）:
+```ts
+const message =
+  error instanceof Error ? error.message
+  : (error && typeof error === "object" && "message" in error
+      ? String((error as { message: unknown }).message)
+      : JSON.stringify(error));
+```
+更稳妥的是封装一个 `extractInvokeErrorMessage(error)` 到 `tauri-invoke.ts`/`transport.ts`，所有 catch 站点统一调用，避免 5 处复制走漏。
+
+### 3. 服务端 Rust 侧 TLS accept 路径日志
+
+**有 tracing 基建**(Cargo.toml line 35-36 直接依赖），main.rs line 125-129 `tracing_subscriber::fmt().with_env_filter(EnvFilter::try_from_default_env()...)` — **`RUST_LOG` 生效**。
+
+但 **TLS accept 路径 0 条 log**:
+- `main.rs:300-310` 只打启动一次 `info!("Connect/gRPC server listening (mTLS 1.3)")`;`axum_server::bind_rustls(...).serve(...)` 内部 accept loop、握手成功/失败、对等 IP、协商 SNI/cipher/ALPN、cert verify fail 全部静默
+- `build_rustls_server_config` (line 414-460) 加载 cert/key/root-CA 的 4 处 `with_context(|| format!("read ..."))` — 仅 err chain，启动一旦成功就不留任何 log；运行时 cert reload 也无路径
+- `WebPkiClientVerifier` verify 失败 → rustls 内部 alert，应用层收不到（握手错误从 axum_server 透到时已被静默吞）
+- 无 `axum::middleware` tap 记录 peer-IP/SNI;rustls 0.23 `logging` feature 未在 Cargo.toml 启用，且 rustls 走 `log` crate 不是 `tracing`，需要 `tracing-log` bridge 才能从 `RUST_LOG=rustls=debug` 受益
+
+**P1 建议**:
+- 改 `axum_server::bind_rustls` 为手写 `TcpListener + TlsAcceptor` 循环；或加 `tower::ServiceBuilder` 的 `TraceLayer`/自定义 ConnectInfo middleware 记录 `peer_addr, sni, cipher, alpn`
+- rustls 加 `tracing-log` bridge + Cargo feature `logging`，使 `RUST_LOG=rustls=debug` 可观测握手细节
+- accept loop:`info!(peer=%addr, "TLS accept")` / `warn!(peer=%addr, err=?e, "TLS handshake failed")` / `info!(peer=%addr, sni=?sni, cipher=?cs, alpn=?alpn, "TLS handshake ok")`
+- WebPkiClientVerifier 自定义包装（impl `ClientCertVerifier`),`verify_client_cert` 失败时 `warn!(subject=?subj, reason=%err, "client cert rejected")`
+
+### 4. 既有日志基建可用性
+
+`tauri-app-log` crate 提供 `append_app_data_log_line_with_limit(app:&AppHandle, path, line, max_bytes) -> Result<PathBuf>`，写到 `app.path().app_data_dir() + relative_path`，字节限长（截 tail 不滚动）。现存调用（`apps/demo/src-tauri/src/lib.rs`):
+- line 158 `taskflow_debug_log` → `taskflow-debug.log`
+- line 170 `demo_tts_debug_log` → `demo-tts-debug.log`
+- line 182 `game_debug_log` → `game-debug.log`
+
+**`main.rs:2` `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` 已确认** — release 下 stderr/stdout 都丢（无 console),`eprintln!` 静默无效；`Cargo.toml` 无 tracing 也无 log 框架初始化。**TLS log 必须走 app_data_log 文件**，且 `lib.rs:1341-1350` 现有 `DOUBAO_DEBUG=1` 模式仅作用于 CryptoProvider install 一次，不覆盖 TLS 路径。`RUST_LOG` 客户端不读。
+
+### 5. 推荐方案矩阵（W4 用）
+
+**P0（先修 JS bug + 客户端加 log 文件）**:
+1. **新 `tls_debug_log` Tauri 命令**（仿 `taskflow_debug_log`)+ `argo_tls.rs` 各决策点通过新增内部 helper 写文件。需要把 `AppHandle` 从 `gateway_mtls_proxy` line 304 / `forward_mtls_stream` line 391 的 `build_http_client(None, true)` 改为传入 `Some(&app)` 并向下透到 `apply_mtls`、`client_ca_cert_pem`。建议每行格式 `[argo_tls][ISO8601] <event> key=value…`。决策点至少：CA 加载结果（哪条路径、字节数、SHA1 前 8)、identity 加载结果（crt 数量、key 类型）、URL 解析结果（scheme/host/port + allowlist 命中分支）、reqwest send 错误分类（connect/request/timeout/redirect + `is_connect()`)、CA from_pem 成功/失败
+2. **JS `String(error)` 修复 5 处**(`transport.ts:302`、`robot-sdk.ts:136`、`manage-robot.tsx:267/391/523/652`)，用统一 `extractInvokeErrorMessage` helper
+3. `AppError` 建议加可选 `cause: Option<String>`（向后兼容 serde 默认 None),`format!("...: {e}")` 处把完整 `{:?}` 写入 `cause` 字段，否则 chain 永久丢失
+
+**P1（服务端）**:`RUST_LOG=rustls=debug` + `tracing-log` bridge + middleware/handroll accept loop 记录 peer 握手信息
+**P2**:release `windows_subsystem` 下 stderr 全丢 → 客户端继续使用 eprintln 调试的所有点都应迁到 app_data_log,`DOUBAO_DEBUG` 或新 `ARGO_TLS_DEBUG` 仅作为开关控制输出粒度
+
+### 6. ESCALATEs
+
+1. **`windows_subsystem` 在 dev/debug 下保留控制台**(cfg_attr 只在 not(debug_assertions)）但 W1 发现 windev2 跑的是 debug 构建却也无 stderr 可见 → 进程是被 GUI spawn 还是 RDP detached？这影响 P0 是否仅文件 log 就够。orchestrator 决断
+2. `Cargo.toml` 客户端未启用 rustls `logging` feature — 是否启用？涉及编译产物尺寸 + 是否排查 rustls 内部 event。orchestrator 决断
+3. W2 报告在完成时 `out-W2.log` 仍为 0 字节，本报告未消费 W2 证据；若 W2 后续给出服务端实际运行 log，需要二次对照 §3 建议的现实差距
+4. `axum_server` 0.8 是否暴露 accept-loop callback 让应用侧拿到 handshake 成败、或必须 handroll？我未翻 `axum-server` crate 源码，留给 W4 决断
+5. transport.ts:302 的 `new Error(String(err))` 是更早期 bug 抛入口（streaming 分支），修复同时需要考虑 unary 分支（line 362）是否也需 try/catch 包装
+
+Files written/modified: **none**(write-set EMPTY，遵守 prompt)。
+
+HEAD-guard:`d95dc0c Merge branch 'main' of git.sudoai.cc:Parsifal/Gawain`,status `?? ../`。
+
+Elapsed: 3min28s

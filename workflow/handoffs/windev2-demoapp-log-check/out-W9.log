@@ -1,0 +1,30 @@
+## W9 Final Report
+
+### 1. 文档创建
+
+- **文件路径**: `/home/wangdang/work/ai-stack/code/frontend/robot-app-platform/docs/guides/demo-tls-fix-2026-08-18.md`
+- **总字数**: 6607 字符（含 markdown 标点/英文），其中中文正文约 2300-2500 字，符合 1500-2500 字目标
+- **章节大纲 (H2)**:
+  1. 一句话总结
+  2. 故障现象
+  3. 排查经过（5 个 worker 的故事）— W1 / W2 / W3 / W4 / W5 / 同步代码 + 释放端口 / 验证
+  4. 根因白话解释 — 第 1 层 HOME 假设错 / 第 2 层 JS 翻译器 / 第 3 层无日志黑盒
+  5. 修复内容白话讲 — 修复 1/2/3
+  6. 经验教训（5 条）
+  7. 后续待办 — skyline 同 bug / 其他遗留
+
+### 2. 关键引用证据
+
+- **W1**: 证书全在、TCP/TLS_OK 通到 110.65:50053，但 app log 自 16:32 后 0 写入；配置里 `robot_ip` 是旧的 100.100:50051
+- **W2**: SP000065 服务端 16:40 起 0 条 TLS 日志（ClientHello 没到）；离线 reqwest+rustls 探针用同组证书 HTTP 200 → 客户端问题；`argo_tls.rs:60-74` `client_dir()` 只查 `HOME`，Windows 注册表无此键
+- **W3**: `argo_tls.rs` 1179 行 0 tracing；`AppError` 序列化成 `{name, message}` plain object 无 cause；JS 5 处 `String(error)` 把对象变 `[object Object]`；服务端 TLS accept 也 0 log
+- **W4**: 加 `tls_log` + 10+ 决策点埋点；`AppError::RequestFailed` 加 `cause` 字段；JS 新增 `extractInvokeErrorMessage`；`cargo check` 2.55s 0 错误
+- **W5**: `client_dir()` 改为 `USERPROFILE → HOME → "."` 优先级；`cargo check` 2.08s 0 错误
+- **W8**: skyline `argo_tls.rs:59-67` 同样有 HOME bug 且全文 0 tracing；skyline 无 `AppError`，JS 侧 `String(error)` 安全（返回 plain String）；建议复用 `runtime_log/` 而非 demo 简陋版
+- **验证日志**: `client_dir resolved dir=C:\Users\jack\.argo-tls` → `apply_mtls ok` → `gateway_mtls_proxy ok status=200`
+
+### 3. ESCALATEs
+
+无。
+
+`Elapsed: 4min50s`

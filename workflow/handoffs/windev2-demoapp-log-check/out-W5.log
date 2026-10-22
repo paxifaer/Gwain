@@ -1,0 +1,34 @@
+## 1. 改动文件 + 行号
+
+`argo_tls.rs` line 112-114（修改前 2 行 → 修改后 6 行）
+
+**修改前** (line 112-114):
+```rust
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".argo-tls")
+}
+```
+
+**修改后** (line 112-117):
+```rust
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let dir = home.join(".argo-tls");
+    tls_log(format!("client_dir resolved dir={}", dir.display()));
+    dir
+}
+```
+
+要点： 用 `var_os` 而非 `var`（与 W4 `tls_log` line 21 同款风格、容忍非 UTF-8 路径）; 优先级 `USERPROFILE` (Win) → `HOME` (Linux/macOS) → `"."`； return 前 `tls_log` 记录最终 `dir`，用户可在 `argo-tls-debug.log` grep `client_dir resolved`。`PathBuf` 已在 line 2 import，无需新增。
+
+## 2. `cargo check` 结果
+
+`cargo check -p SudoRobot` 用时 **2.08s**,**0 错误**。6 个 warning 全部为 `lib.rs` / `skyline_launcher.rs` 中 pre-existing 未用变量，与本次改动无关（`argo_tls.rs` 无 warning)。
+
+## 3. ESCALATEs
+
+无。
+
+Elapsed: 0min50s.
